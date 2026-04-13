@@ -1359,7 +1359,4007 @@ body.battle-active .brand-kicker {
 }
 
     </style>
-    <script defer src="assets/arena-app.js"></script>
+    <script>
+(function () {
+  "use strict";
+
+  /** Online rooms: deploy cloudflare-fighters-online-worker.js and paste its origin here. */
+  var ONLINE_ROOM_WORKER_URL = "https://sweet-boat-a64f.quintify2.workers.dev/";
+  /**
+   * AI prompts: use the **same** URL as ONLINE_ROOM_WORKER_URL after you redeploy that worker.
+   * The room Worker proxies POST / → Gemini with CORS (works from file://). Only set a different URL if you use a separate CORS-enabled hub.
+   */
+  var WORKER_URL = ONLINE_ROOM_WORKER_URL;
+
+  var _net = {
+    role: null,
+    code: null,
+    secret: null,
+    lastBeat: -1,
+    lastRematchEpoch: 0,
+    guestPollTimer: null,
+    hostPollTimer: null,
+    rematchPollTimer: null,
+    battlePollTimer: null,
+    /** Beat seq we already fired online auto-retreat for (avoid repeat submits). */
+    autoRetreatSentBeatSeq: null,
+    /** Client fallback pick window when API omits commitDeadlineAt (ms timestamp). */
+    _fallbackPickEnd: null,
+    _fallbackPickBeat: null,
+    guestJoined: false,
+    guestFighter: null,
+  };
+
+  function onlineRoomBase() {
+    return String(ONLINE_ROOM_WORKER_URL || "")
+      .trim()
+      .replace(/\/?$/, "/");
+  }
+
+  function onlineFetch(path, opts) {
+    var base = onlineRoomBase();
+    if (!base) return Promise.reject(new Error("Set ONLINE_ROOM_WORKER_URL to your room worker URL."));
+    var url = base + path.replace(/^\//, "");
+    return fetch(url, opts).then(function (res) {
+      return res.text().then(function (text) {
+        var data = null;
+        if (text) {
+          try {
+            data = JSON.parse(text);
+          } catch (ignore) {
+            data = null;
+          }
+        }
+        if (!res.ok) {
+          throw new Error((data && data.error) || text || "HTTP " + res.status);
+        }
+        if (data && data.ok === false && data.error) throw new Error(String(data.error));
+        return data != null ? data : {};
+      });
+    });
+  }
+
+  function clearNetPollTimers() {
+    if (_net.guestPollTimer != null) {
+      clearTimeout(_net.guestPollTimer);
+      _net.guestPollTimer = null;
+    }
+    if (_net.hostPollTimer != null) {
+      clearTimeout(_net.hostPollTimer);
+      _net.hostPollTimer = null;
+    }
+    if (_net.rematchPollTimer != null) {
+      clearTimeout(_net.rematchPollTimer);
+      _net.rematchPollTimer = null;
+    }
+    if (_net.battlePollTimer != null) {
+      clearTimeout(_net.battlePollTimer);
+      _net.battlePollTimer = null;
+    }
+  }
+
+  function resetNetSession() {
+    clearNetPollTimers();
+    _net.role = null;
+    _net.code = null;
+    _net.secret = null;
+    _net.lastBeat = -1;
+    _net.lastRematchEpoch = 0;
+    _net.guestJoined = false;
+    _net.guestFighter = null;
+    _net.autoRetreatSentBeatSeq = null;
+    _net._fallbackPickEnd = null;
+    _net._fallbackPickBeat = null;
+    var gs = document.getElementById("gameScreen");
+    if (gs) gs.classList.remove("online-arena-min");
+    var oct = document.getElementById("onlineCommitTimer");
+    if (oct) {
+      oct.setAttribute("hidden", "");
+      oct.textContent = "";
+    }
+    var ocb = document.getElementById("onlineCodeBlock");
+    if (ocb) ocb.hidden = true;
+    var od = document.getElementById("onlineCodeDisplay");
+    if (od) od.textContent = "";
+  }
+
+  function playModeValue() {
+    var r = document.querySelector('input[name="playMode"]:checked');
+    return r ? r.value : "ai";
+  }
+
+  function isOnlinePlaySelected() {
+    return playModeValue() === "online";
+  }
+
+  function isOnlineBattle() {
+    return !!(isOnlinePlaySelected() && _net.role && _net.code && _net.secret);
+  }
+
+  function syncOnlineBattleFooterButtons() {
+    var nb = document.getElementById("newBtn");
+    var rb = document.getElementById("rematchBtn");
+    if (!nb || !rb) return;
+    if (!isOnlineBattle()) {
+      nb.hidden = false;
+      nb.style.display = "";
+      rb.hidden = true;
+      rb.style.display = "none";
+      return;
+    }
+    nb.hidden = true;
+    nb.style.display = "none";
+    rb.hidden = !(state && state.over);
+    rb.style.display = rb.hidden ? "none" : "";
+    if (!rb.hidden) {
+      rb.disabled = false;
+      rb.textContent = "Rematch";
+    }
+  }
+
+  function applyOnlineRematchIfReady(data) {
+    if (!data || !data.setup || !data.setup.d) return false;
+    var epoch = data.rematchEpoch || 0;
+    if (epoch < 1 || epoch <= _net.lastRematchEpoch) return false;
+    _net.lastRematchEpoch = epoch;
+    _net.lastBeat = -1;
+    var d =
+      _net.role === "guest" ? swapSetupForGuest(data.setup.d) : JSON.parse(JSON.stringify(data.setup.d));
+    var fv =
+      _net.role === "guest"
+        ? swapFirstValForGuest(data.setup.firstVal || "player")
+        : data.setup.firstVal || "player";
+    var ar = data.setup.arena != null ? data.setup.arena : "";
+    fightFullLog = [];
+    var rb = document.getElementById("rematchBtn");
+    if (rb) {
+      rb.textContent = "Rematch";
+      rb.disabled = false;
+    }
+    enterBattleFromSetup(d, fv, ar);
+    syncOnlineBattleFooterButtons();
+    return true;
+  }
+
+  function startOnlineRematchWatcher() {
+    if (!isOnlineBattle() || !state || !state.over) return;
+    clearNetPollTimers();
+    function tick() {
+      if (!isOnlineBattle() || !state || !state.over) {
+        _net.rematchPollTimer = null;
+        return;
+      }
+      pollRoomOnce()
+        .then(function (data) {
+          if (applyOnlineRematchIfReady(data)) return;
+          var rb = document.getElementById("rematchBtn");
+          if (rb && !rb.hidden) {
+            var mine = _net.role === "host" ? data.rematchHostAck : data.rematchGuestAck;
+            var theirs = _net.role === "host" ? data.rematchGuestAck : data.rematchHostAck;
+            if (mine && !theirs) rb.textContent = "Waiting for opponent…";
+            else rb.textContent = "Rematch";
+          }
+          _net.rematchPollTimer = setTimeout(tick, 850);
+        })
+        .catch(function () {
+          if (isOnlineBattle() && state && state.over) _net.rematchPollTimer = setTimeout(tick, 1200);
+        });
+    }
+    tick();
+  }
+
+  function postOnlineFighter(fighterName) {
+    if (!_net.code || !_net.secret) return Promise.reject(new Error("Not in a room."));
+    return onlineFetch("api/room/" + encodeURIComponent(_net.code) + "/fighter", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ secret: _net.secret, fighter: fighterName }),
+    });
+  }
+
+  function updateHostLobbyFromPoll(data) {
+    if (_net.role !== "host" || !isOnlinePlaySelected()) return;
+    var hint = document.getElementById("onlineLobbyHint");
+    if (!hint) return;
+    hint.hidden = false;
+    _net.guestJoined = !!data.guestJoined;
+    if (data.guestFighter) _net.guestFighter = data.guestFighter;
+    var beginBtn = document.getElementById("onlineBeginBtn");
+    var hostLocked = !!(data.hostFighter && String(data.hostFighter).trim().length >= 2);
+    var guestLocked = !!(data.guestFighter && String(data.guestFighter).trim().length >= 2);
+    if (beginBtn) {
+      beginBtn.disabled = !(data.guestJoined && hostLocked && guestLocked);
+    }
+    if (!data.guestJoined) {
+      hint.textContent = "Waiting for Player 2 to join with your code.";
+    } else if (!guestLocked) {
+      hint.textContent = "Player 2 joined — waiting for them to lock their fighter.";
+    } else if (!hostLocked) {
+      hint.textContent = "Player 2 is ready (" + data.guestFighter + "). Lock your fighter below, then tap Begin battle.";
+    } else {
+      hint.textContent = "Both fighters locked — tap Begin battle to start the match for both of you.";
+    }
+  }
+
+  function startHostLobbyPoll() {
+    clearNetPollTimers();
+    function tick() {
+      if (_net.role !== "host" || !isOnlinePlaySelected() || !_net.code || !_net.secret) return;
+      pollRoomOnce()
+        .then(function (data) {
+          updateHostLobbyFromPoll(data);
+          if (_net.role !== "host" || !isOnlinePlaySelected()) return;
+          _net.hostPollTimer = setTimeout(tick, 1100);
+        })
+        .catch(function () {
+          if (_net.role === "host" && isOnlinePlaySelected()) _net.hostPollTimer = setTimeout(tick, 2200);
+        });
+    }
+    tick();
+  }
+
+  function resetGuestCharPanelUi() {
+    var inp = document.getElementById("guestFighterInput");
+    var btn = document.getElementById("guestFighterLockBtn");
+    if (inp) {
+      inp.value = "";
+      inp.disabled = false;
+    }
+    if (btn) btn.disabled = false;
+  }
+
+  function resetHostOnlineCharUi() {
+    var you = document.getElementById("you");
+    var hbtn = document.getElementById("hostFighterLockBtn");
+    if (you) you.disabled = false;
+    if (hbtn) hbtn.disabled = false;
+  }
+
+  function startGuestWaitingForSetup() {
+    clearNetPollTimers();
+    function tick() {
+      pollRoomOnce()
+        .then(function (data) {
+          if (data.hasSetup && data.setup && data.setup.d) {
+            clearNetPollTimers();
+            var d = swapSetupForGuest(data.setup.d);
+            enterBattleFromSetup(
+              d,
+              swapFirstValForGuest(data.setup.firstVal || "player"),
+              data.setup.arena || ""
+            );
+            setOnlineStatus("");
+            return;
+          }
+          _net.guestPollTimer = setTimeout(tick, 900);
+        })
+        .catch(function (e) {
+          setOnlineStatus((e && e.message) || String(e));
+        });
+    }
+    tick();
+  }
+
+  function setOnlineStatus(msg) {
+    var el = document.getElementById("onlineStatus");
+    if (el) el.textContent = msg || "";
+  }
+
+  function syncOnlineSetupUI() {
+    var online = isOnlinePlaySelected();
+    var panel = document.getElementById("onlinePanel");
+    var wrap = document.getElementById("setupFieldsWrap");
+    var startBtn = document.getElementById("startBtn");
+    var beginBtn = document.getElementById("onlineBeginBtn");
+    var beginWrap = document.getElementById("onlineBeginWrap");
+    var rowOpp = document.getElementById("setupRowOpp");
+    var rowFirst = document.getElementById("setupRowFirst");
+    var rowArena = document.getElementById("setupRowArena");
+    var hostLockWrap = document.getElementById("onlineHostLockWrap");
+    var gPanel = document.getElementById("guestCharPanel");
+    var lobbyHint = document.getElementById("onlineLobbyHint");
+    var hostCard = document.getElementById("onlineHostPathCard");
+    var guestCard = document.getElementById("onlineGuestPathCard");
+    var cue = document.getElementById("onlineHostFormCue");
+    var lblYou = document.getElementById("labelYouPlayAs");
+    var hasUrl = !!onlineRoomBase();
+    if (panel) panel.hidden = !online;
+    if (!online) {
+      var gs0 = document.getElementById("gameScreen");
+      if (gs0) gs0.classList.remove("online-arena-min");
+      if (wrap) wrap.removeAttribute("hidden");
+      if (startBtn) {
+        startBtn.style.display = "";
+        startBtn.hidden = false;
+      }
+      if (beginWrap) beginWrap.hidden = true;
+      if (rowOpp) rowOpp.style.display = "";
+      if (rowFirst) rowFirst.style.display = "";
+      if (rowArena) rowArena.style.display = "";
+      if (hostLockWrap) hostLockWrap.hidden = true;
+      if (gPanel) gPanel.hidden = true;
+      if (lobbyHint) {
+        lobbyHint.hidden = true;
+        lobbyHint.textContent = "";
+      }
+      if (hostCard) hostCard.hidden = false;
+      if (guestCard) guestCard.hidden = false;
+      if (cue) {
+        cue.hidden = true;
+        cue.textContent = "";
+      }
+      if (lblYou) lblYou.textContent = "You play as";
+      var youInp0 = document.getElementById("you");
+      if (youInp0) youInp0.placeholder = "Character + series";
+      return;
+    }
+    if (!hasUrl) {
+      if (wrap) wrap.removeAttribute("hidden");
+      if (startBtn) {
+        startBtn.style.display = "none";
+        startBtn.hidden = true;
+      }
+      if (beginWrap) beginWrap.hidden = true;
+      if (rowOpp) rowOpp.style.display = "none";
+      if (rowFirst) rowFirst.style.display = "none";
+      if (rowArena) rowArena.style.display = "none";
+      if (hostLockWrap) hostLockWrap.hidden = true;
+      if (gPanel) gPanel.hidden = true;
+      if (lobbyHint) {
+        lobbyHint.hidden = true;
+        lobbyHint.textContent = "";
+      }
+      if (hostCard) hostCard.hidden = false;
+      if (guestCard) guestCard.hidden = false;
+      if (cue) {
+        cue.hidden = true;
+        cue.textContent = "";
+      }
+      setOnlineStatus("Paste your room worker URL into ONLINE_ROOM_WORKER_URL in the page script.");
+      if (lblYou) lblYou.textContent = "You play as";
+      var youInpNu = document.getElementById("you");
+      if (youInpNu) youInpNu.placeholder = "Character + series";
+      return;
+    }
+    if (rowFirst) rowFirst.style.display = "none";
+    if (rowArena) rowArena.style.display = "none";
+    if (startBtn) {
+      startBtn.style.display = "none";
+      startBtn.hidden = true;
+    }
+
+    if (!_net.role) {
+      if (wrap) wrap.setAttribute("hidden", "");
+      if (beginWrap) beginWrap.hidden = true;
+      if (hostLockWrap) hostLockWrap.hidden = true;
+      if (gPanel) gPanel.hidden = true;
+      if (lobbyHint) {
+        lobbyHint.hidden = true;
+        lobbyHint.textContent = "";
+      }
+      if (hostCard) hostCard.hidden = false;
+      if (guestCard) guestCard.hidden = false;
+      if (cue) {
+        cue.hidden = true;
+        cue.textContent = "";
+      }
+      if (lblYou) lblYou.textContent = "You play as";
+      var youInpNr = document.getElementById("you");
+      if (youInpNr) youInpNr.placeholder = "Character + series";
+      return;
+    }
+
+    if (_net.role === "guest") {
+      if (beginWrap) beginWrap.hidden = true;
+      if (wrap) wrap.setAttribute("hidden", "");
+      if (rowOpp) rowOpp.style.display = "";
+      if (hostLockWrap) hostLockWrap.hidden = true;
+      if (gPanel) gPanel.hidden = false;
+      if (lobbyHint) {
+        lobbyHint.hidden = true;
+        lobbyHint.textContent = "";
+      }
+      if (hostCard) hostCard.hidden = true;
+      if (guestCard) guestCard.hidden = true;
+      if (cue) {
+        cue.hidden = true;
+        cue.textContent = "";
+      }
+      if (lblYou) lblYou.textContent = "You play as";
+      var youInpG = document.getElementById("you");
+      if (youInpG) youInpG.placeholder = "Character + series";
+    } else if (_net.role === "host") {
+      if (wrap) wrap.removeAttribute("hidden");
+      if (rowOpp) rowOpp.style.display = "none";
+      if (gPanel) gPanel.hidden = true;
+      if (hostCard) hostCard.hidden = false;
+      if (guestCard) guestCard.hidden = true;
+      if (beginWrap) beginWrap.hidden = false;
+      if (beginBtn) beginBtn.disabled = true;
+      if (hostLockWrap) hostLockWrap.hidden = false;
+      if (lobbyHint) {
+        lobbyHint.hidden = false;
+        if (!lobbyHint.textContent) lobbyHint.textContent = "Waiting for Player 2 to join with your code.";
+      }
+      if (cue) {
+        cue.hidden = false;
+        cue.innerHTML =
+          "You are <strong>Player 1 (host)</strong>. Enter your fighter below, then tap <strong>Lock in your character</strong>.";
+      }
+      if (lblYou) lblYou.textContent = "Your fighter (Player 1)";
+      var youInpH = document.getElementById("you");
+      if (youInpH) youInpH.placeholder = "e.g. Goku — Dragon Ball";
+    }
+  }
+
+  function swapFirstValForGuest(hostFirst) {
+    return hostFirst === "opponent" ? "player" : "opponent";
+  }
+
+  function swapSetupForGuest(d) {
+    var x = JSON.parse(JSON.stringify(d));
+    function sw(a, b) {
+      var t = x[a];
+      x[a] = x[b];
+      x[b] = t;
+    }
+    sw("player", "opponent");
+    sw("playerMoveChart", "opponentMoveChart");
+    sw("playerAbilities", "opponentAbilities");
+    sw("playerActiveFormId", "opponentActiveFormId");
+    sw("playerMaxHp", "opponentMaxHp");
+    sw("playerHp", "opponentHp");
+    sw("playerEnergy", "opponentEnergy");
+    sw("fatiguePlayer", "fatigueOpponent");
+    sw("playerPassiveStacks", "opponentPassiveStacks");
+    sw("playerStatuses", "opponentStatuses");
+    if (
+      (Array.isArray(x.opponentCompanionRoster) && x.opponentCompanionRoster.length) ||
+      (Array.isArray(x.opponentCompanions) && x.opponentCompanions.length) ||
+      (Array.isArray(x.playerCompanionRoster) && x.playerCompanionRoster.length) ||
+      (Array.isArray(x.playerCompanions) && x.playerCompanions.length)
+    ) {
+      if (!Array.isArray(x.playerCompanionRoster)) x.playerCompanionRoster = [];
+      if (!Array.isArray(x.opponentCompanionRoster)) x.opponentCompanionRoster = [];
+      if (!Array.isArray(x.playerCompanions)) x.playerCompanions = [];
+      if (!Array.isArray(x.opponentCompanions)) x.opponentCompanions = [];
+      sw("playerCompanionRoster", "opponentCompanionRoster");
+      sw("playerCompanions", "opponentCompanions");
+    }
+    if (x.firstTurn === "player") x.firstTurn = "opponent";
+    else if (x.firstTurn === "opponent") x.firstTurn = "player";
+    return x;
+  }
+
+  function swapOnlineTurnResultForGuest(r) {
+    if (!r || typeof r !== "object") return r;
+    var o = JSON.parse(JSON.stringify(r));
+    function sw(k1, k2) {
+      var t = o[k1];
+      o[k1] = o[k2];
+      o[k2] = t;
+    }
+    sw("playerHp", "opponentHp");
+    sw("playerEnergy", "opponentEnergy");
+    sw("fatiguePlayer", "fatigueOpponent");
+    sw("playerStatuses", "opponentStatuses");
+    sw("playerPassiveStacks", "opponentPassiveStacks");
+    sw("playerLastMoveCategory", "opponentLastMoveCategory");
+    sw("playerActiveFormId", "opponentActiveFormId");
+    if (Object.prototype.hasOwnProperty.call(o, "playerAttackGate") || Object.prototype.hasOwnProperty.call(o, "opponentAttackGate")) {
+      sw("playerAttackGate", "opponentAttackGate");
+    }
+    if (o.nextTurn === "player") o.nextTurn = "opponent";
+    else if (o.nextTurn === "opponent") o.nextTurn = "player";
+    if (o.winner === "player") o.winner = "opponent";
+    else if (o.winner === "opponent") o.winner = "player";
+    return o;
+  }
+
+  function pollRoomOnce() {
+    if (!_net.code || !_net.secret) return Promise.reject(new Error("Not in a room."));
+    var u =
+      onlineRoomBase() +
+      "api/room/" +
+      encodeURIComponent(_net.code) +
+      "/poll?secret=" +
+      encodeURIComponent(_net.secret) +
+      "&sinceBeat=" +
+      encodeURIComponent(String(_net.lastBeat));
+    return fetch(u).then(function (res) {
+      return res.text().then(function (text) {
+        var data = null;
+        if (text) {
+          try {
+            data = JSON.parse(text);
+          } catch (ignore) {
+            data = null;
+          }
+        }
+        if (!res.ok || !data || !data.ok) throw new Error((data && data.error) || text || "Poll failed");
+        return data;
+      });
+    });
+  }
+
+  function formatOnlineCountdown(ms) {
+    var x = Math.max(0, Math.ceil(Number(ms) / 1000));
+    var m = Math.floor(x / 60);
+    var s = x % 60;
+    return m + ":" + (s < 10 ? "0" + s : String(s));
+  }
+
+  /** 2 minutes 30 seconds — pick window for the player who has not committed yet. */
+  var ONLINE_PICK_WINDOW_MS = 150000;
+
+  function parseServerPickDeadline(data) {
+    if (!data) return null;
+    var raw = data.commitDeadlineAt;
+    if (raw == null || raw === "") return null;
+    var n = typeof raw === "number" ? raw : Number(raw);
+    if (!isFinite(n) || n < 1e12) return null;
+    return n;
+  }
+
+  /**
+   * End time (ms) for the slow picker. Uses server deadline when present; otherwise starts a local
+   * 2:30 window on first poll where this player must act (so missing API field never means "already expired").
+   */
+  function resolvePickWindowEndMs(data, needMe) {
+    if (!needMe) {
+      return parseServerPickDeadline(data);
+    }
+    var serverEnd = parseServerPickDeadline(data);
+    if (serverEnd != null) {
+      _net._fallbackPickEnd = null;
+      _net._fallbackPickBeat = null;
+      return serverEnd;
+    }
+    var b = typeof data.beatSeq === "number" ? data.beatSeq : -1;
+    if (_net._fallbackPickBeat !== b || _net._fallbackPickEnd == null) {
+      _net._fallbackPickBeat = b;
+      _net._fallbackPickEnd = Date.now() + ONLINE_PICK_WINDOW_MS;
+    }
+    return _net._fallbackPickEnd;
+  }
+
+  function syncOnlineCommitDeadlineFromPoll(data) {
+    if (!isOnlineBattle() || !state || state.over) return;
+    var te = document.getElementById("onlineCommitTimer");
+    if (!te) return;
+    var needMe =
+      (_net.role === "host" && data.waitingForHostCommit) ||
+      (_net.role === "guest" && data.waitingForGuestCommit);
+    var waitThem =
+      (_net.role === "host" && data.waitingForGuestCommit) ||
+      (_net.role === "guest" && data.waitingForHostCommit);
+    if (!needMe && !waitThem) {
+      _net.autoRetreatSentBeatSeq = null;
+      _net._fallbackPickEnd = null;
+      _net._fallbackPickBeat = null;
+      te.setAttribute("hidden", "");
+      te.textContent = "";
+      return;
+    }
+    te.removeAttribute("hidden");
+    if (needMe) {
+      var endMe = resolvePickWindowEndMs(data, true);
+      var leftMe = Math.max(0, endMe - Date.now());
+      te.textContent =
+        leftMe > 0
+          ? "Turn clock: pick in " + formatOnlineCountdown(leftMe) + " or auto-retreat (if your stance allows)."
+          : "Time up — auto-retreat if allowed.";
+      if (
+        leftMe <= 0 &&
+        !state._submitBusy &&
+        typeof data.beatSeq === "number" &&
+        _net.autoRetreatSentBeatSeq !== data.beatSeq
+      ) {
+        if (!isRageStance() && !isChargeStance()) {
+          _net.autoRetreatSentBeatSeq = data.beatSeq;
+          submitPlayerAction({ type: "retreat" });
+        } else {
+          te.textContent = "Timer expired — Rage/Charge blocks auto-retreat. Pick a legal move.";
+        }
+      }
+    } else if (waitThem) {
+      var endWait = parseServerPickDeadline(data);
+      var leftWait = endWait != null ? Math.max(0, endWait - Date.now()) : null;
+      te.textContent =
+        leftWait != null && leftWait > 0
+          ? "Opponent deciding… " + formatOnlineCountdown(leftWait) + " left."
+          : "Opponent deciding… (they have up to 2:30 to pick).";
+    }
+  }
+
+  function startOnlineBattleHeartbeat() {
+    if (_net.battlePollTimer != null) {
+      clearTimeout(_net.battlePollTimer);
+      _net.battlePollTimer = null;
+    }
+    if (!isOnlineBattle()) return;
+    function tick() {
+      _net.battlePollTimer = null;
+      if (!isOnlineBattle() || !state || state.over) return;
+      if (state._submitBusy) {
+        _net.battlePollTimer = setTimeout(tick, 900);
+        return;
+      }
+      pollRoomOnce()
+        .then(function (data) {
+          syncOnlineCommitDeadlineFromPoll(data);
+          if (isOnlineBattle() && state && !state.over) _net.battlePollTimer = setTimeout(tick, 1100);
+        })
+        .catch(function () {
+          if (isOnlineBattle() && state && !state.over) _net.battlePollTimer = setTimeout(tick, 2000);
+        });
+    }
+    _net.battlePollTimer = setTimeout(tick, 400);
+  }
+
+  function waitForResolvedBeat() {
+    return pollRoomOnce().then(function (data) {
+      syncOnlineCommitDeadlineFromPoll(data);
+      var lab = document.getElementById("oppThinkingLabel");
+      if (lab) {
+        if (data.resolving) lab.textContent = "Resolving beat…";
+        else {
+          var endW = parseServerPickDeadline(data);
+          var leftW = endW != null ? Math.max(0, endW - Date.now()) : null;
+          if (
+            (_net.role === "host" && data.waitingForGuestCommit) ||
+            (_net.role === "guest" && data.waitingForHostCommit)
+          ) {
+            lab.textContent =
+              leftW != null && leftW > 0
+                ? "Waiting for opponent… " + formatOnlineCountdown(leftW)
+                : "Waiting for opponent to pick…";
+          } else {
+            lab.textContent = "Waiting for opponent & resolve…";
+          }
+        }
+      }
+      var t0 = typeof _net._resolveWaitT0 === "number" ? _net._resolveWaitT0 : Date.now();
+      if (Date.now() - t0 > 210000) {
+        _net._resolveWaitT0 = 0;
+        throw new Error("Timed out waiting for the room (opponent or resolve). Try again.");
+      }
+      if (data.resolved && data.result && typeof data.beatSeq === "number" && data.beatSeq > _net.lastBeat) {
+        _net._resolveWaitT0 = 0;
+        return data;
+      }
+      return new Promise(function (resolve) {
+        setTimeout(function () {
+          waitForResolvedBeat().then(resolve);
+        }, 750);
+      });
+    });
+  }
+
+  function postOnlineSetup(d, firstVal, arena) {
+    if (_net.role !== "host" || !_net.code || !_net.secret) return Promise.resolve();
+    return onlineFetch("api/room/" + encodeURIComponent(_net.code) + "/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        hostSecret: _net.secret,
+        d: d,
+        firstVal: firstVal,
+        arena: arena != null ? arena : "",
+      }),
+    });
+  }
+
+  function commitOnlineTurn(role, enrichedAction, promptState) {
+    var body = { secret: _net.secret, role: role, enrichedAction: enrichedAction };
+    if (role === "host" && promptState) body.promptState = promptState;
+    _net._resolveWaitT0 = Date.now();
+    return onlineFetch("api/room/" + encodeURIComponent(_net.code) + "/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(function () {
+      return waitForResolvedBeat();
+    });
+  }
+
+  var MOVE_CATS = ["basic", "ranged", "heavy", "quick"];
+  var fightFullLog = [];
+  var RPS_PICKS = ["rock", "paper", "scissors"];
+  var COMBAT_MODES = {
+    normal: { id: "normal", energyMult: 1, attackMult: 1, durabilityMult: 1, blockHeavy: false },
+    charge: { id: "charge", energyMult: 0.5, attackMult: 0.5, durabilityMult: 1, blockHeavy: true },
+    rage: { id: "rage", energyMult: 1.5, attackMult: 1.3, durabilityMult: 1, blockHeavy: false },
+    defensive: { id: "defensive", energyMult: 1, attackMult: 0.6, durabilityMult: 1.3, blockHeavy: false },
+  };
+
+  function normalizePlayerAttackGate(g) {
+    if (!g || typeof g !== "object") return null;
+    if (g.kind !== "rps_shoot") return null;
+    var cat = String(g.winCategory || "").toLowerCase();
+    if (MOVE_CATS.indexOf(cat) === -1) return null;
+    var id = String(g.winMoveId || "").trim();
+    if (!id) return null;
+    if (state && state.playerMoveChart) {
+      var moves = state.playerMoveChart[cat] || [];
+      var found = false;
+      for (var i = 0; i < moves.length; i++) {
+        if (moves[i].id === id) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) return null;
+    }
+    return {
+      kind: "rps_shoot",
+      id: String(g.id || "rps_gate")
+        .replace(/\s+/g, "_")
+        .slice(0, 80),
+      title: String(g.title || "Judgment").slice(0, 200),
+      body: String(g.body || "Choose rock, paper, or scissors.").slice(0, 1200),
+      winCategory: cat,
+      winMoveId: id,
+      winLabel: g.winLabel != null ? String(g.winLabel).slice(0, 120) : null,
+    };
+  }
+
+  function randomOpponentRpsPick() {
+    if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+      var u = new Uint8Array(1);
+      crypto.getRandomValues(u);
+      return RPS_PICKS[u[0] % 3];
+    }
+    return RPS_PICKS[Math.floor(Math.random() * 3)];
+  }
+
+  function rpsCompare(playerPick, oppPick) {
+    if (playerPick === oppPick) return 0;
+    if (
+      (playerPick === "rock" && oppPick === "scissors") ||
+      (playerPick === "paper" && oppPick === "rock") ||
+      (playerPick === "scissors" && oppPick === "paper")
+    )
+      return 1;
+    return -1;
+  }
+
+  function renderGateHint() {
+    var el = document.getElementById("attackGateHint");
+    if (!el) return;
+    if (!state || state.over || !state.playerAttackGate) {
+      el.hidden = true;
+      el.textContent = "";
+      return;
+    }
+    el.hidden = false;
+    el.textContent =
+      (state.playerAttackGate.title || "Trial") +
+      " — Attack opens Shoot (rock / paper / scissors), not your normal list. Abilities & Retreat still work.";
+  }
+
+  function openAttackGateOverlay() {
+    var gate = state.playerAttackGate;
+    if (!gate || gate.kind !== "rps_shoot") return;
+    document.getElementById("attackGateTitle").textContent = gate.title || "Trial";
+    document.getElementById("attackGateBody").textContent = gate.body || "";
+    var res = document.getElementById("attackGateResult");
+    res.hidden = true;
+    res.textContent = "";
+    document.getElementById("attackGatePanel").classList.remove("is-resolving");
+    document.querySelectorAll("#attackGateRpsRow .rps-btn").forEach(function (b) {
+      b.disabled = false;
+    });
+    document.getElementById("attackGateOverlay").classList.add("is-open");
+  }
+
+  function closeAttackGateOverlay() {
+    document.getElementById("attackGateOverlay").classList.remove("is-open");
+    var panel = document.getElementById("attackGatePanel");
+    if (panel) panel.classList.remove("is-resolving");
+  }
+
+  function onRpsChoice(ev) {
+    var gate = state.playerAttackGate;
+    if (!state || state.over || !gate || gate.kind !== "rps_shoot") return;
+    var panel = document.getElementById("attackGatePanel");
+    if (!panel || panel.classList.contains("is-resolving")) return;
+    var btn = ev.currentTarget;
+    var playerPick = btn.getAttribute("data-pick");
+    if (!playerPick || RPS_PICKS.indexOf(playerPick) === -1) return;
+    panel.classList.add("is-resolving");
+    document.querySelectorAll("#attackGateRpsRow .rps-btn").forEach(function (b) {
+      b.disabled = true;
+    });
+    var oppPick = randomOpponentRpsPick();
+    var cmp = rpsCompare(playerPick, oppPick);
+    var outcome = cmp === 0 ? "tie" : cmp > 0 ? "win" : "lose";
+    var pretty = { rock: "Rock", paper: "Paper", scissors: "Scissors" };
+    var resEl = document.getElementById("attackGateResult");
+    resEl.hidden = false;
+    resEl.textContent =
+      "You: " +
+      pretty[playerPick] +
+      " · Opponent: " +
+      pretty[oppPick] +
+      " — " +
+      (outcome === "win"
+        ? "You win. Resolving your strike…"
+        : outcome === "lose"
+          ? "You lose. Resolving…"
+          : "Tie. Resolving…");
+    setTimeout(function () {
+      closeAttackGateOverlay();
+      if (!state || state.over) return;
+      var g = state.playerAttackGate;
+      if (!g || g.kind !== "rps_shoot") return;
+      if (outcome === "win") {
+        submitPlayerAction({
+          type: "attack",
+          category: g.winCategory,
+          moveId: g.winMoveId,
+          attackGateResolution: {
+            kind: "rps_shoot",
+            gateId: g.id,
+            outcome: "win",
+            playerPick: playerPick,
+            opponentPick: oppPick,
+          },
+        });
+      } else if (outcome === "lose") {
+        submitPlayerAction({
+          type: "integration",
+          integrationKind: "rps_shoot",
+          integrationId: g.id,
+          outcome: "lose",
+          playerPick: playerPick,
+          opponentPick: oppPick,
+        });
+      } else {
+        submitPlayerAction({
+          type: "integration",
+          integrationKind: "rps_shoot",
+          integrationId: g.id,
+          outcome: "tie",
+          playerPick: playerPick,
+          opponentPick: oppPick,
+        });
+      }
+    }, 900);
+  }
+
+  var THREAT_TIER_LIST = [
+    { id: "house", label: "House / room", rank: 1, floorDura: 2, floorOff: 2, floorSpd: 3, floorSta: 4, floorHeal: 0, floorEn: 50 },
+    { id: "street", label: "Street / district", rank: 2, floorDura: 6, floorOff: 5, floorSpd: 5, floorSta: 6, floorHeal: 0, floorEn: 100 },
+    { id: "city", label: "City", rank: 3, floorDura: 25, floorOff: 20, floorSpd: 20, floorSta: 20, floorHeal: 2, floorEn: 400 },
+    { id: "mountain", label: "Mountain / large town", rank: 4, floorDura: 60, floorOff: 50, floorSpd: 45, floorSta: 35, floorHeal: 3, floorEn: 800 },
+    { id: "country", label: "Country / island", rank: 5, floorDura: 150, floorOff: 120, floorSpd: 100, floorSta: 60, floorHeal: 5, floorEn: 2000 },
+    { id: "continental", label: "Continental", rank: 6, floorDura: 400, floorOff: 350, floorSpd: 250, floorSta: 120, floorHeal: 10, floorEn: 5000 },
+    { id: "moon", label: "Moon / minor planetary", rank: 7, floorDura: 1000, floorOff: 900, floorSpd: 600, floorSta: 200, floorHeal: 20, floorEn: 15000 },
+    { id: "planet", label: "Planetary", rank: 8, floorDura: 2500, floorOff: 2200, floorSpd: 1500, floorSta: 350, floorHeal: 40, floorEn: 40000 },
+    { id: "star", label: "Stellar", rank: 9, floorDura: 7000, floorOff: 6000, floorSpd: 4000, floorSta: 500, floorHeal: 60, floorEn: 100000 },
+    { id: "solar", label: "Solar system", rank: 10, floorDura: 20000, floorOff: 18000, floorSpd: 12000, floorSta: 800, floorHeal: 100, floorEn: 300000 },
+    { id: "galaxy", label: "Galactic", rank: 11, floorDura: 60000, floorOff: 55000, floorSpd: 35000, floorSta: 1200, floorHeal: 200, floorEn: 1000000 },
+    { id: "universal", label: "Universal", rank: 12, floorDura: 200000, floorOff: 180000, floorSpd: 100000, floorSta: 3000, floorHeal: 500, floorEn: 3000000 },
+    { id: "multiversal", label: "Multiversal+", rank: 13, floorDura: 600000, floorOff: 550000, floorSpd: 300000, floorSta: 8000, floorHeal: 1500, floorEn: 10000000 },
+  ];
+
+  var ANIME_TROPE_ABILITY_LINES = [
+    "Aura flare burst — cone of visible fighting spirit",
+    "Compressed energy orb — spiraling sphere rush",
+    "Flash-step flurry — afterimage melee chain",
+    "Flying thunder knee — aerial gap closer",
+    "Spirit sword draw — single lethal iaijutsu line",
+    "Barrier hex lattice — geometric shield wall",
+    "Blood-limit: crimson needles — homing shard storm",
+    "Shadow stitch bind — threads that pin limbs",
+    "Gravity well stomp — localized crush field",
+    "Sound-step sonic boom — speed shockwave",
+    "Ice mirror feint — reflective clone decoy",
+    "Flame tornado lariat — spinning fire grab",
+    "Stone skin mantle — temporary earthen armor",
+    "Wind tunnel vacuum — pull then slash",
+    "Lightning rail step — conductive dash strike",
+    "Paper charm explosion — delayed seal blast",
+    "Bone spear eruption — osseous spikes from ground",
+    "Sand coffin compression — dehydrating bind",
+    "Water prison orb — rolling liquid jail",
+    "Plant vine grapnel — rooting snare combo",
+    "Steel wire marionette — puppeteer strings",
+    "Ink beast summon — painted creature attacks",
+    "Clock stagger — brief local time skip",
+    "Probability razor — luck-weighted cut",
+    "Soul gaze pressure — mental stagger aura",
+    "Domain: crimson sky — rules rewrite pocket",
+    "Domain: silent library — knowledge trial field",
+    "Reversal red — damage echo on attacker",
+    "Cursed speech compel — one-word command",
+    "Black flash impact — space-distortion hit",
+    "Hollow mask surge — risk/reward power spike",
+    "Bankai-style release — transformation climax",
+    "Susanoo-style ribcage — spectral armor frame",
+    "Rasen-style drill — grinding core bore",
+    "Chidori-style pierce — lightning straight thrust",
+    "Getsuga-style arc — moonlit flying slash",
+    "Kame-style beam — long charge line blast",
+    "Spirit gun snap — quick finger bolt",
+    "Detroit smash shockwave — ground pound nova",
+    "One-for-all full cowl — distributed power wrap",
+    "Hardening full body — iron skin stance",
+    "Observation haki glint — precog read",
+    "Armament haki coat — invisible armor layer",
+    "Conqueror haki burst — willpower knockdown wave",
+    "Gear second pulse — blood pump overdrive",
+    "Gear fourth bounce — compression hop strike",
+    "Room operation slice — spherical dissection",
+    "Gamma knife phase — internal radiation cut",
+    "Spirit ball gather — crowd-funded sphere",
+    "Death note clause — conditional doom mark",
+    "Geass absolute order — forced obedience once",
+    "Alchemy transmute spear — matter reshape stab",
+    "Gate of Babylon rain — treasure volley",
+    "Excalibur-tier beam — noble phantasm line",
+    "Gae Bolg heart twist — causality pierce thrust",
+    "Unlimited blade works — sword replication field",
+    "Tailed beast bomb — charged biju sphere",
+    "Amaterasu black flame — unquenchable burn",
+    "Kamui warp swallow — space tear absorb",
+    "Rinnegan pull push — vector gravity control",
+    "Shadow clone feint swarm — mass misdirection",
+    "Eight gates release — life-burning limiter off",
+    "Rock lee weights drop — true speed reveal",
+    "Nichirin breathing form — element sword tempo",
+    "Total concentration constant — stamina lock buff",
+    "Thunder breathing first — lightning draw cut",
+    "Water breathing flow — drag reduction parry chain",
+    "Flame breathing spiral — rising dragon cleave",
+    "Mist breathing obfuscate — sight-erase swings",
+    "Stone breathing stability — unmovable guard",
+    "Serpent breathing coil — wrapping disarm",
+    "Love breathing ribbon — wide charming arcs",
+    "Sound breathing echolocation — blind fight read",
+    "Insect breathing swarm — toxin needle assist",
+    "Flower breathing petal storm — slicing blossom veil",
+    "Beast breathing wild rush — primal tackle combo",
+    "Sun breathing final form — composite element flurry",
+    "Cursed technique: idle transfiguration — touch reshape",
+    "Cursed technique: disaster flames — volcanic curse",
+    "Cursed technique: limitless — approaching slowdown",
+    "Cursed technique: ten shadows — shikigami pack",
+    "Cursed technique: copy — mimic observed skill",
+    "Cursed technique: ratio — weak-point line highlight",
+    "Cursed technique: construction — materialize tools",
+    "Stand: time erase — skipped moments assault",
+    "Stand: future sight — precognitive evade",
+    "Stand: zipper dimension — portal seam travel",
+    "Stand: healing touch — repair allies mid-fight",
+    "Alchemy circle trap — floor glyph detonation",
+    "Philosopher pulse — truth-seeking disintegration",
+    "Ether gear overdrive — machine spirit fuse",
+    "Satan soul partial — demon limb graft",
+    "Takeover beast partial — animal trait morph",
+    "Requip armor swap — instant loadout change",
+    "Celestial spirit gate — summon contract ally",
+    "Crash magic shatter — structural weakness break",
+    "Ice-make dynamic — rapid ice weapon forge",
+    "Fire dragon roar — breath cone",
+    "Lightning dragon roar — piercing bolt breath",
+    "Sky dragon roar — healing wind gust",
+  ];
+
+  var ANIME_TROPE_ABILITY_CATALOG_APPEND =
+    "\n\n=== ANIME-STYLE ABILITY TROPES (100 design seeds — you MAY implement any as **canon-accurate** moves/forms/nonAttack for either fighter; rename to fit the IP. Not an exhaustive IP list; creative equivalents encouraged.) ===\n" +
+    ANIME_TROPE_ABILITY_LINES.map(function (line, i) {
+      return i + 1 + ". " + line;
+    }).join("\n") +
+    "\n\nWhen designing fighters, **actively consider** pulling **1–3** tropes from this catalog (or close variants) into **moveChart**, **forms**, or **nonAttack** so battles stay varied. Self-buff tropes belong in **nonAttack** or **forms** with clear **statusGrantSelf** / statModifiers.";
+
+  var FEAT_SCALING_BLOCK =
+    "FEAT-BASED STAT METHODOLOGY (mandatory for BASE numbers; do not eyeball without this):\n" +
+    "Layer 1 — RAW FEATS: For attack/offense, defense/durability, speed, stamina/endurance, healing/regen, and (separately) special/hax, list mentally the character’s canon feats across ALL media. Classify each feat’s tier rank R (integer 0–12): 0 normal human, 1 peak human, 2 superhuman, 3 building, 4 city, 5 country, 6 continental, 7 planetary, 8 solar system, 9 galactic, 10 universal, 11 multiversal, 12 omniversal. TierValue(R)=10^R (e.g. R=4→10000).\n" +
+    "Reliability weight w in [0,1] per feat: 1.0 on-screen definite; 0.8 strong implication; 0.6 backed statement; 0.4 weak statement; 0.2 outlier/inconsistent; 0 joke/non-canon—omit or set w=0. AdjustedFeatValue = TierValue * w.\n" +
+    "Anti-wank: if a single feat’s tier exceeds the category’s average tier by ≥2, cap its effective tier to average+1 before TierValue. Anti-lowball: ignore one-off weak feats far below the norm unless repeated. Powerscaling: transitive chains A>B>C allowed; do NOT use chains longer than two steps (no A>B>C>D>E).\n" +
+    "Attack Potency / Destructive Capacity: AP can scale from hurting foes who tank a level even if visible destruction is smaller—unless the verse explicitly contradicts. Judge each case on merit.\n" +
+    "Per category composite: StatBlend = 0.7×max(adjusted values) + 0.3×mean(adjusted values).\n" +
+    "ConsistencyScore CS = (feats in the dominant tier band) / (total counted feats) for that category, clamp 0–1. ConsistencyMult = 0.5 + 0.5×CS.\n" +
+    "Hax tier H in [0,10]: 0 none; ~2 minor elements; ~4 illusions/paralysis; ~6 time slow/strong regen/teleport; ~8 time stop/causality; ~10 reality/conceptual rewrite. HaxMult = 1 + H/20.\n" +
+    "FinalComposite(category) = StatBlend × ConsistencyMult × HaxMult (use category-specific HaxMult only for offense/defense/healing/special where hax clearly applies; speed/stamina usually HaxMult=1 unless canon justifies).\n" +
+    "IMPORTANT — WIKI TIER vs GAME STATS: wikiTierLabel and threatLabel MUST be justified by **Attack Potency / Destructive Capacity and durability feats on the standard VS Battle Wiki chart**, NOT by metaphors, titles, or hax alone. Hax (soul warp, domains, etc.) increases **haxTier** and **specialGrade**; it does **NOT** by itself place someone at galaxy/universal/cosmic AP. If unsure between two tiers, pick the **lower** AP tier.\n" +
+    "VSBW macro reminder (numbers are INVERSE of power): **Tier 10 = Human, Tier 9 = Superhuman, Tier 8 = Urban, Tier 7 = Nuclear/town–mountain, Tier 6 = Island–continent, Tier 5 = Moon–planet, Tier 4 = Star–multi-solar, Tier 3 = Galaxy / universal 3-D** — so **“Tier 3” means COSMIC (galaxy+)**. Only use wikiTierMacro “Tier 3” or labels like 3-C / High 3-A if feats actually match **that** destructive scale. Most shonen antagonists are **Tier 7–5**, not Tier 3.\n" +
+    "CALIBRATION EXAMPLES (not limits—verify canon): **JJK** special-grade curses (e.g. Mahito, Jogo): typically **High 7-C to 7-A** or **6-C** AP band on the wiki chart—**NOT** Tier 3 cosmic, **NOT** “multiversal” unless explicit cosmology. **City-level** characters → Tier 7 band. **Planet** busting → Tier 5. **Galaxy** → Tier 3 only with galaxy feats.\n" +
+    "GAME OPEN POINTS: Set offensePoints, durabilityPoints, speedPoints, staminaPoints, healingPoints to round(max(1, FinalComposite)) for each matching category. energyPoolMax must lore-match stamina/output (same methodology where applicable). **maxHp (client-enforced):** set **playerMaxHp** / **opponentMaxHp** to **round(180 × durabilityPoints^1.28 + 80 × durabilityPoints)** with **minimum 600** (same formula the UI uses)—not durability×100.\n" +
+    "DISPLAY FEAT GRADE (optional check): 100*log10(max(10, FinalComposite))/12 per category; the UI derives this from open points automatically.\n\n" +
+    "WIKI-STYLE OVERALL TIER: wikiTierLabel = exact notation (e.g. High 7-C, 6-A, 5-B). wikiTierMacro = VSBW macro only, e.g. **\"Tier 7\"** (town/mountain band) or **\"Tier 6\"** (island–continent)—must match AP. **Never** output wikiTierMacro \"Tier 3\" for street/city/island-level characters. threatLabel: one honest line (e.g. \"High 7-A AP; strong hax\") — only use words like **cosmic / universal / multiversal** in threatLabel if wikiTierLabel is actually in the **Tier 3–2** AP range (or Tier 4 stellar+) with feat support; for Tier 7–6 characters say **city / island / country** scale instead.\n" +
+    "haxTier 0–10; featConsistency 0–1; intelligenceGrade/specialGrade optional 0–100.\n\n" +
+    "DEEP FEAT & POTENTIAL PASS (mandatory before final numbers): After Layer-1 feats, add **Layer 2 — UNTAPPED / IMPLIED POTENTIAL** only where canon supports it: training statements, rival scaling, author interviews, databooks, and **consistent** powercliff arcs. Weight these at **≤0.5w** reliability unless explicitly shown on-screen. **Anti-wank:** do not assume multiversal AP from “could be stronger” without feats. **Anti-lowball:** if a character’s **consistent high-end** feats are narrowly above your composite, you may raise the relevant open point by **at most one** adjacent tier band (document in notes). **Cross-fighting** (e.g. vs a known tier) is a valid secondary check—still cap transitive chains.\n\n" +
+    "LEGACY threat slug: threatTier (house…multiversal) + threatRank 1–13 + threatLabel must stay **consistent** with wiki AP tier: e.g. **city** → city/mountain slug (~rank 3–4); **cosmic AP** → moon/planet+ only. Do not set threatTier **universal/multiversal** unless wiki-tier feats are actually universal/multiversal.\n\n";
+
+  var BACKEND_SETUP =
+    "Arena combat. JSON ONLY; escape newlines (\\n). Research ALL canon media: manga, anime, movies, OVAs, games, novels, etc.—not manga-only.\n\n" +
+    FEAT_SCALING_BLOCK +
+    "BASE STATS (critical): durabilityPoints, offensePoints, speedPoints, staminaPoints, healingPoints, energyPoolMax are BASE form only—before transformations. Forms use statModifiers; do not bake temporary modes into BASE.\n\n" +
+    "ATTACKS (same workflow as abilities; do NOT output raw inventory). KEEP all canon form-locked attacks: use onlyInFormIds so moves stay tied to the right transformation.\n" +
+    "(1) List every battle-usable attack (exclude non-combat-only pure gags unless actually used as attacks).\n" +
+    "(2) Sort into basic/ranged/heavy/quick.\n" +
+    "(3) Output ≤10 per category. Each move MUST have energyPercent ≥1.\n" +
+    "Move: { id, name, energyPercent, techniqueFactor, onlyInFormIds }. techniqueFactor = positive decimal (typical 0.15–3.5): relative canon lethality / execution weight of THIS move—not a second “power stat”. Weak jabs ~0.2–0.6; finishers 2–4+. There is NO per-move attackPower field.\n" +
+    "ENERGY PER MOVE: energyPercent must reflect cost. Start from category floor (quick ~2–5, basic ~3–7, ranged ~4–9, heavy ~7–16), add round(techniqueFactor×3–5), add cost for long windups; cap honest builds ~35 except legendary finishers. If energyPoolMax is huge (cosmic), use slightly lower percentages for spammy moves so pools feel vast.\n\n" +
+    "FORMS & ABILITIES: list every canon transformation/mode (≤10 forms). Each form: { id, name, energyPercent≥1, attackMultiplier, description, requiresFormIds?, statModifiers? }.\n" +
+    "attackMultiplier ≥1.0 multiplies outgoing damage while active (stack mentally with BASE offense; do not replace offensePoints).\n" +
+    "requiresFormIds: string[] of form ids REQUIRED to be currently active before this form can be taken (canon chains, e.g. super mode that only exists after an earlier transform). Empty or omit if usable from base.\n" +
+    "statModifiers (optional): { offenseMult, speedMult, durabilityMult, staminaMult, healingMult, energyPoolMult } each defaults 1.0 if omitted; typical range 0.5–8. While active, effective stat = BASE × mult for combat (speed order, soak, fatigue, heals). Form activation = full beat.\n" +
+    "nonAttack: ≤10 entries; each { id, name, energyPercent≥1, onlyInFormIds?, buffTargets?, statusGrantSelf?, statusGrantEnemy?, healPercentMaxHp?, barrierPercentMaxHp?, description? } — heals, shields, **self-buffs**, cleanses, fields.\n" +
+    "buffTargets: **self** | **enemy** | **both** (default **self** for classic power-ups). **statusGrantSelf** / **statusGrantEnemy**: optional arrays of { type:buff|debuff|dot|cc, intensity, turnsLeft, label } the resolve step should apply when that ability is used (resolve may tweak numbers for balance). **healPercentMaxHp** / **barrierPercentMaxHp**: optional 0–25 hints for self recovery or shield strength. **description** must mention who is buffed and how.\n\n" +
+    "healingPoints: 0 or lore scale (BASE).\n\n" +
+    "passives: 0–4 per fighter. ONLY always-on / constantly active traits. stackType hits|rounds|none; maxStacks number|null.\n\n" +
+    "SUPPORT ROSTER (**mandatory**; player only — **names only**): You **must** output **playerCompanionRoster** as an array of **1–4** objects. Each: { id, name, series }. Use stable **id** (slug). **Do not** put moves here. If you mistakenly used **playerCompanions** for name-only rows, still duplicate them into **playerCompanionRoster** so the UI can list them. Full move sheets load when the player taps Support (or from Redis). Also acceptable: nest the same array under **player.companions** or **player.allies** if you prefer—client merges those.\n\n" +
+    "Return JSON:\n" +
+    "{\n" +
+    '  "player": {\n' +
+    '    "name": string, "series": string,\n' +
+    '    "wikiTierLabel": string,\n' +
+    '    "wikiTierMacro": string,\n' +
+    '    "haxTier": number,\n' +
+    '    "featConsistency": number,\n' +
+    '    "intelligenceGrade": number|null,\n' +
+    '    "specialGrade": number|null,\n' +
+    '    "threatTier": string, "threatRank": number, "threatLabel": string,\n' +
+    '    "durabilityPoints": number, "offensePoints": number, "speedPoints": number, "staminaPoints": number,\n' +
+    '    "healingPoints": number,\n' +
+    '    "energyPoolMax": number,\n' +
+    '    "notes": string,\n' +
+    '    "passives": [{ "id": string, "label": string, "description": string, "stackType": "hits"|"rounds"|"none", "maxStacks": number|null }]\n' +
+    "  },\n" +
+    '  "opponent": { same structure },\n' +
+    '  "playerMoveChart": { "basic": [...], "ranged": [...], "heavy": [...], "quick": [...] },\n' +
+    '  "playerAbilities": { "forms": [...], "nonAttack": [...] },\n' +
+    '  "opponentMoveChart": { "basic": [...], "ranged": [...], "heavy": [...], "quick": [...] },\n' +
+    '  "opponentAbilities": { "forms": [...], "nonAttack": [...] },\n' +
+    '  "playerActiveFormId": null|string,\n' +
+    '  "opponentActiveFormId": null|string,\n' +
+    '  "playerMaxHp": number (round(180×durability^1.28 + 80×durability), min 600),\n' +
+    '  "opponentMaxHp": number (same),\n' +
+    '  "playerEnergy": number (start full = player.energyPoolMax),\n' +
+    '  "opponentEnergy": number (start full = opponent.energyPoolMax),\n' +
+    '  "fatiguePlayer": 0, "fatigueOpponent": 0,\n' +
+    '  "playerPassiveStacks": [{ "id": string, "label": string, "stacks": number, "maxStacks": number|null }],\n' +
+    '  "opponentPassiveStacks": [ ... ],\n' +
+    '  "playerStatuses": [],\n' +
+    '  "opponentStatuses": [],\n' +
+    '  "playerCompanionRoster": [{ "id": string, "name": string, "series": string }],\n' +
+    '  "introNarrative": string,\n' +
+    '  "firstTurn": "player"|"opponent"\n' +
+    "}\n\n" +
+    "Battle **status rows** start empty; **playerCompanionRoster** is names-only—full ally sheets are generated on first Support pick (see BACKEND_COMPANION_GENERATE).\n\n" +
+    "During resolve, statuses use type buff|debuff|dot|cc, turnsLeft (beats), intensity1–9—see resolve STATUS EFFECTS.\n\n" +
+    "DOMAIN / TRIAL MOVES: If an opponent’s canon includes a **domain or trial** that blocks normal strikes until a minigame resolves (e.g. Deadly Sentencing), put the player’s **allowed finisher** on playerMoveChart with a stable id (e.g. Executioner Sword in **heavy**) so resolve can point **playerAttackGate.winMoveId** at it. During battle, resolve will set **playerAttackGate** so the client runs fair RPS for Attack only.\n\n" +
+    "Initialize passive stacks at 0 unless canon says they start buffed. firstTurn must match user message.\n" +
+    "Mirror passive stack rows to match each fighter's passives by id." +
+    ANIME_TROPE_ABILITY_CATALOG_APPEND;
+
+  var BACKEND_OPPONENT_PICK =
+    "Opponent's simultaneous beat pick. JSON ONLY. You do NOT know the player's action. Pick from opponentMoveChart/opponentAbilities; respect energy (retreat costs 1% pool min). No HP change.\n" +
+    "ENERGY (mandatory): Use opponent's current opponentEnergy and effective energy pool max (BASE energyPoolMax × active form energyPoolMult). For ANY pick, compute cost = ceil(poolMax × energyPercent/100) from the chosen move/ability JSON (min 1 for non-retreat). The opponent MUST NOT choose an attack, form, or nonAttack whose cost exceeds opponentEnergy. If retreat, cost is at least 1% of pool (ceil). If no attack/ability is affordable, pick retreat if affordable; if even retreat is impossible (energy 0 and pool rules), valid:false with retryMessage explaining energy lock.\n" +
+    "SPEED: Higher speedPoints acts first on a beat for offensive actions (see resolve). Assume simultaneous commitment but prioritize faster foe mentally.\n" +
+    "FORMS: Opponent may only pick a form if current active form satisfies that form's requiresFormIds (or none). Form-locked attacks require matching active form.\n" +
+    "SPECIAL UI: GAME STATE may include **playerAttackGate** (see resolve). Player may be resolving a trial this beat—still pick a legal opponentAction; domain pressure does not skip your pick.\n" +
+    "SUPPORT: GAME STATE includes **playerCompanionRoster** (names), **playerCompanions** (fully loaded allies only), and **supportUsedIds**. The player may call **support**; you still pick your own action without knowing their exact move id.\n" +
+    "**VISIBLE PLAYER TACTICS (read JSON every time):** **playerCombatMode** = their selected stance (**normal|charge|rage|defensive**). **playerPlanArmed** = **distract** | **feint** | **null** (what they queued in the UI for this commit). **planContextSnapshot** = IQ estimates, distract resist stacks, retreat stacks, success hints. You **do** see these—weight them (e.g. feint may mean a tricky retreat; distract may mean a bait) but you still output **your** simultaneous **opponentAction** without peeking at their exact attack id.\n\n" +
+    "Return:\n" +
+    "{\n" +
+    '  "valid": boolean,\n' +
+    '  "retryMessage": string|null,\n' +
+    '  "opponentAction": {\n' +
+    '    "type": "attack"|"ability"|"retreat",\n' +
+    '    "category": "basic"|"ranged"|"heavy"|"quick"|null,\n' +
+    '    "moveId": string|null,\n' +
+    '    "abilityKind": "form"|"nonAttack"|null,\n' +
+    '    "abilityId": string|null\n' +
+    "  }\n" +
+    "}\n\n" +
+    "Rules: type attack requires category+moveId from opponentMoveChart (respect onlyInFormIds) AND energy cost ≤ opponentEnergy. **HEAVY CADENCE:** If **opponentLastMoveCategory** is **heavy**, you MUST NOT pick type **attack** with category **heavy** (pick another category, ability, or retreat). type ability: form/nonAttack only if cost ≤ opponentEnergy AND form prerequisites satisfied. retreat: no ids; only if affordable. If nothing valid, valid:false with retryMessage." +
+    ANIME_TROPE_ABILITY_CATALOG_APPEND;
+
+  var BACKEND_COMPANION_GENERATE =
+    "Generate **one** ally’s **full** combat sheet for Support. JSON ONLY; escape newlines.\n\n" +
+    "You receive: ALLY { id, name, series }, PLAYER summary, OPPONENT summary, DATABASE REGISTRY. If registry or canon implies this character already has a known tier, stay consistent. Ally should usually be **weaker** than the main player unless lore says otherwise.\n\n" +
+    "Output the same move/energy rules as main setup: moveChart basic/ranged/heavy/quick (≤10 each), playerAbilities { forms, nonAttack }, BASE stats (durabilityPoints, offensePoints, speedPoints, staminaPoints, healingPoints, energyPoolMax), wikiTierLabel optional.\n\n" +
+    "Return:\n" +
+    "{\n" +
+    '  "valid": boolean,\n' +
+    '  "retryMessage": string|null,\n' +
+    '  "companion": {\n' +
+    '    "id": string, "name": string, "series": string,\n' +
+    '    "wikiTierLabel": string,\n' +
+    '    "durabilityPoints": number, "offensePoints": number, "speedPoints": number, "staminaPoints": number,\n' +
+    '    "healingPoints": number, "energyPoolMax": number,\n' +
+    '    "moveChart": { "basic": [...], "ranged": [...], "heavy": [...], "quick": [...] },\n' +
+    '    "playerAbilities": { "forms": [...], "nonAttack": [...] }\n' +
+    "  }\n" +
+    "}\n\n" +
+    "If you cannot research the ally, valid:false with retryMessage." +
+    ANIME_TROPE_ABILITY_CATALOG_APPEND;
+
+  var BACKEND_RESOLVE =
+    "Resolve one beat; both actions revealed. JSON ONLY; escape newlines.\n\n" +
+    "**CLIENT TACTICS (mandatory read):** The JSON includes **playerTacticsSummary** { combatMode, plan, feintRetreat, planContext } — the player’s **confirmed** stance and plan for this beat. It duplicates **playerAction** fields; **they must agree**. Always apply **playerCombatMode** energy rules and **plan** (distract/feint) when present. **playerPlanArmed** at top level matches what they armed before submit.\n\n" +
+    "SPEED ORDER: Compare BASE speedPoints × activeForm.statModifiers.speedMult (default 1) for each fighter. The higher value resolves damaging attacks and offensive abilities FIRST this beat; on a tie, player goes first. Retreats are still resolved with the retreat rules below (simultaneous intent).\n\n" +
+    "EFFECTIVE STATS: For any combat math, use BASE × relevant form statModifiers (offenseMult, speedMult, durabilityMult, staminaMult, healingMult, energyPoolMult). If a modifier is missing, treat as 1. BASE numbers are fixed for the match—forms only multiply.\n\n" +
+    "ENERGY: cost = ceil(energyPoolMax × energyPercent/100) with minimum 1 unit (or 1% pool min for retreat). Apply opponent’s energyPoolMult only if that side is in a form that changes pool—then use effective pool max for that fighter this beat.\n\n" +
+    "PASSIVE RECHARGE (every fighter, every beat): AFTER costs, add +5% of that fighter’s effective energyPoolMax (clamp to max).\n\n" +
+    "**CHARGE STANCE — FLOW REBATE (player only):** When **playerCombatMode** is **charge** and **playerAction.type** is **attack** (including an **rps_shoot** **win** strike), **after** all other energy steps this beat (attack cost, **+5%** passive recharge, retreat/support bonuses, etc.): if that **player attack** **was not hard-interrupted**—i.e. it **connects** with **any** opponent **HP loss** you attribute to that swing **or** lands as **real pressure** (not a **total whiff**, **full** miss under retreat/speed rules, or a **complete** clash **nullification** with **zero** effect)—add **+10%** of the player’s **effective energyPoolMax** to **playerEnergy** (then clamp to max). If the swing is **fully negated** / **no meaningful contact**, **omit** this **+10%**. Say so briefly in **narrative** when applied.\n\n" +
+    "RETREAT BONUS: If a fighter chose retreat and their retreat succeeds (faster on retreat vs attack; or both retreated), add +10% of energyPoolMax to that fighter's energy (after the +5% recharge, still clamped).\n\n" +
+    "DAMAGE (you judge from full fight context — no fixed formula): The JSON includes **resolveEffectiveStats** per side (offense/durability/speed/etc. with active form mults and formAttackMultiplier) plus full GAME STATE. **maxHp is now large for high durability**—treat percent-of-maxHp damage as **small** so fights last.\n" +
+    "**MARATHON PACE (mandatory):** Even matchups should need **~18–45+ meaningful beats** before KO. **Never** erase someone from **near-full HP in under ~6 beats** unless the wiki-tier gap is **huge** (e.g. cosmic vs street).\n" +
+    "**Durability soak:** Let **R = target.durabilityEffective / max(1, attacker.offenseEffective)** (from resolveEffectiveStats). When **R ≥ 1.15**, **shrink** the hit’s intended **% maxHp** loss by about **~1/R** (tanks visibly take less). When **R ≤ 0.9**, you may use the **upper** end of the bands below—still respect marathon pacing.\n" +
+    "**% maxHp bands (per target, per beat, after soak):** Routine clean hits **~0.04%–1.5% maxHp**; solid blows **~1.2%–3.5%**; heavy / finisher beats **up to ~5–8%**; story spike **≤11%** only with strong justification. **Chip / graze** often **0.02%–0.55%**. **DoT tick:** **~0.04%–0.55% maxHp** per beat × intensity scale (was higher—lower it). (1) Apply damage only after retreat/melee/quick rules—**no passive dodge roll**. (2) Output **integer** HP; no **zero** damage on a clean heavy without reason. (3) Never subtract raw offensePoints as flat HP—always **% maxHp** you can defend in the narrative. Healing uses healingEffective and lore.\n" +
+    "RETREAT VS ATTACK (speed):\n" +
+    "- basic & heavy (melee commit): if the target retreated and target speedPoints > attacker speedPoints, the attack misses or only chips; if attacker is faster, it lands as usual.\n" +
+    "- quick & ranged vs retreating target: if attacker speedPoints > target speedPoints, the attack ALWAYS hits (full damage rules). If attacker speed ≤ target speed, roll hit chance P = attackerSpeed / (attackerSpeed + targetSpeed) once—if hit, full damage; if miss, no damage (narrate graze/narrow miss). When speeds are equal, P = 0.5.\n" +
+    "STATUS EFFECTS (timed buffs/debuffs from attacks & abilities): Each entry is { type, intensity, turnsLeft, label }. **type** must be one of: **buff** (shields, regen, haste), **debuff** (slow, weaken, vulnerable, mark, armor break), **dot** (poison, burn, bleed, corrosion), **cc** (stun, daze, freeze, sleep, root/bind—hard control). **intensity** 1–9 = severity or DoT tier (higher = stronger ticks or deeper slow). **turnsLeft** = **full beats remaining** after this resolve (integer ≥0); the client shows beats as “t”. **At end of every resolve**, decrement **turnsLeft by 1** on each status for **both** fighters, then **delete** rows at 0 before outputting playerStatuses/opponentStatuses.\n\n" +
+    "**When to apply:** Inflict on **successful hits** or when a **self/ally buff** or **grounded field** explicitly grants it. Cleanses and immunities may remove or shorten in the same beat if canon-justified.\n\n" +
+    "**Narrative:** In your **narrative** (within the 4-sentence cap), **name the effect** and **state the duration in beats** when you **apply, extend, refresh, or cleanse** it (e.g. “Poison stacks for **three beats**”).\n\n" +
+    "**Duration guide (competitive):** **cc** 1–2 beats (stun rarely above 2); **soft debuff** 2–4; **dot** 2–5 (longer = lower per-tick %); **buff** 2–4 unless domain-wide. Re-apply: **refresh** turnsLeft to the new value or **max(old,new)**; for **dot**, either **+1 intensity** (cap 9) **or** refresh duration—not both every beat unless a special passive says so.\n\n" +
+    "**DoT & HP:** Each beat while **dot** remains, chip via HP (typical **~0.04%–0.55% maxHp per tick** × intensity) in addition to direct hits, or fold into fatigue—**stay consistent**.\n\n" +
+    "Forms/status/DoT/passives stacks. lastMoveCategory: basic|ranged|heavy|quick|heal|buff|form|retreat|support|other|integration.\n\n" +
+    "**HEAVY CADENCE (mandatory):** A fighter cannot use **moveChart.heavy** on **two consecutive beats**. If **playerAction** is attack category **heavy** while **playerLastMoveCategory** is **heavy**, output **valid:false** with **retryMessage** explaining the cadence lock. Same check for **opponentAction** vs **opponentLastMoveCategory**. Any **non-heavy** action (basic/ranged/quick, ability, retreat, support, integration, etc.) lifts the lock for the next beat. **Also:** if **playerCombatMode** is **charge**, the player **cannot** use **heavy** this beat—**valid:false** if they try.\n\n" +
+    "**COMBAT STANCE (player only; client switches for free):** GAME STATE includes **playerCombatMode**: **normal** | **charge** | **rage** | **defensive**. Match **playerAction.playerCombatMode** to state. **resolveEffectiveStats.player** already bakes **attack**/**durability** mults for stance—trust them for damage/soak. You must still apply **stance energy multipliers** to the **player’s** paid costs this beat: **charge** costs **×0.5** (min 1 unit after calc); **rage** costs **×1.5** (ceil); **normal**/**defensive** **×1**. **charge** also forbids **heavy** attacks. **rage** and **charge:** player **cannot** **retreat** — if **playerAction** is **retreat**, **valid:false**. **defensive (guard):** player **cannot** **attack** — if **playerAction.type** is **attack** and it is **not** a mandatory **rps_shoot** **win** resolution (**attackGateResolution.outcome** **win** fulfilling **playerAttackGate**), **valid:false**. Abilities, Support, Retreat where stance allows, integration losses/ties are fine in guard. Narrate stance flavor briefly when it matters.\n\n" +
+    "**PLANS (playerAction.plan + planContext):** **plan** is null | **distract** | **feint**. **planContext** has **playerIntelligence**, **opponentIntelligence** (0–100; treat null IQ as **50**), **opponentDistractResistance**, **distractSuccessChanceHint** and **feintSuccessChanceHint** (each 0–1; client-estimated guides), **playerRetreatFailStacks** (0–8).\n" +
+    "- **distract** (only with player **attack**, **ability**, or **support**—client enforced): Opponent may be mentally baited. Compute distract chance = **clamp(0.40 + (playerIQ−opponentIQ)/100×0.38 − opponentDistractResistance×0.11, 0.06, 0.88)**; stay within **±0.06** of **distractSuccessChanceHint** unless narrative strongly justifies. **Success:** opponent’s **offensive action fizzles or barely chips** this beat (no solid hit); in narrative say they were caught off-guard; set **opponentLastMoveCategory** to **other** or similar; **increment opponentDistractResistance by 1** in your output (cap 99). **Fail:** resolve opponent offense normally. Player’s action still resolves either way.\n" +
+    "- **feint** with **type retreat** and **feintRetreat:true**: A fake-out into retreat—resolve as **retreat** but describe the misread. Use **feintSuccessChanceHint** as a soft guide (±0.08) for whether the foe **bites** on the fake (worse punish / cleaner spacing when it lands narratively); still follow retreat speed rules.\n\n" +
+    "**RETREAT MOMENTUM (player):** **playerRetreatFailStacks** tracks failed retreats. When the **player’s retreat clearly fails** (caught, punished, no spacing gained), **increment stacks by 1** (max 8). When the **player’s retreat clearly succeeds**, **reset stacks to 0**. Each stack adds roughly **+10%** “success weight” on the **next** player retreat (cleaner escape, less chip). Always output the updated **playerRetreatFailStacks** integer.\n\n" +
+    "**nonAttack SELF-BUFFS:** When an ability has **buffTargets:self** (or only self-buff semantics) and/or **statusGrantSelf** in setup JSON, applying it MUST add/refresh those rows on that fighter’s **playerStatuses** or **opponentStatuses** (never skip just because it is non-damaging). Use **playerLastMoveCategory** / **opponentLastMoveCategory** **buff** when the ability is primarily a buff/shield; **heal** if mostly healing. Respect **healPercentMaxHp** / **barrierPercentMaxHp** as soft guides, not flat HP math.\n\n" +
+    "SPECIAL ATTACK GATES — playerAttackGate in GAME STATE: When non-null, the real client **replaces the attack picker** with **Rock / Paper / Scissors** (three buttons). The **opponent throw is drawn uniformly at random in-browser** (crypto); **honor** playerAction’s playerPick, opponentPick, and RPS outcome — do not re-roll or contradict.\n\n" +
+    "CLIENT UI IDS (for your prompts / future builders): overlay #attackGateOverlay; panel #attackGatePanel; title #attackGateTitle; body #attackGateBody; fair line #attackGateFair; buttons #rpsRock #rpsPaper #rpsScissors (attribute data-pick = rock|paper|scissors); result #attackGateResult; close #attackGateClose. **Only the Attack button** uses this sheet; Abilities and Retreat stay available unless a status forbids them.\n\n" +
+    "You output **playerAttackGate** when a trial/domain (etc.) blocks normal strikes until Shoot resolves; use **null** to clear. Shape: { kind: \"rps_shoot\", id: string, title: string, body: string, winCategory: \"basic\"|\"ranged\"|\"heavy\"|\"quick\", winMoveId: string, winLabel: string|null }. winMoveId **must** exist on playerMoveChart[winCategory]. body should state: **win** → only winMoveId strike; **lose** → trial breaks; **tie** → judgment continues, **opponent tempo** (set nextTurn opponent when trial persists).\n\n" +
+    "SUPPORT (playerAction.type **support**): { type:\"support\", companionId: string } — the **main player does not attack** this beat. **playerCompanions** MUST already contain a full entry matching **companionId** (client loads it before resolve). That ally performs **exactly one** strike using **basic**, **quick**, or **ranged** only with **techniqueFactor ≤ 1.5** (no **heavy** row, no signature nuke). Resolve damage using **that ally’s** offense vs opponent durability. The **player** gains **+5%** of the **player’s effective energy pool max** (after costs/recharge unless stated). **supportUsedIds** — reject reuse (valid:false) if companionId already used. playerLastMoveCategory **support**. Opponent still resolves their action.\n\n" +
+    "playerAction extensions: (1) RPS **win**: type attack + category + moveId matching gate + attackGateResolution { kind:\"rps_shoot\", gateId, outcome:\"win\", playerPick, opponentPick } — resolve that attack with normal energy/damage; clear gate if trial ends. (2) RPS **lose** or **tie**: type **integration** with integrationKind \"rps_shoot\", integrationId, outcome lose|tie, playerPick, opponentPick — **no normal player attack** this beat; lose: strip suppressing domain/trial and clear gate; tie: usually **keep gate** and prefer nextTurn opponent; integration costs **0 energy** unless narrative says otherwise.\n\n" +
+    "Return:\n" +
+    "{\n" +
+    '  "valid": boolean,\n' +
+    '  "retryMessage": string|null,\n' +
+    '  "narrative": string (max 4 sentences),\n' +
+    '  "playerHp": number,\n' +
+    '  "opponentHp": number,\n' +
+    '  "playerEnergy": number,\n' +
+    '  "opponentEnergy": number,\n' +
+    '  "fatiguePlayer": number,\n' +
+    '  "fatigueOpponent": number,\n' +
+    '  "playerStatuses": [{ "type": "buff"|"debuff"|"dot"|"cc", "intensity": number (1–9), "turnsLeft": number (beats left after tick), "label": string }],\n' +
+    '  "opponentStatuses": [ ... same schema ... ],\n' +
+    '  "playerPassiveStacks": [{ "id": string, "label": string, "stacks": number, "maxStacks": number|null }],\n' +
+    '  "opponentPassiveStacks": [ ... ],\n' +
+    '  "playerActiveFormId": null|string,\n' +
+    '  "opponentActiveFormId": null|string,\n' +
+    '  "playerLastMoveCategory": string,\n' +
+    '  "opponentLastMoveCategory": string,\n' +
+    '  "playerAttackGate": null|{ "kind": "rps_shoot", "id": string, "title": string, "body": string, "winCategory": "basic"|"ranged"|"heavy"|"quick", "winMoveId": string, "winLabel": string|null },\n' +
+    '  "opponentDistractResistance": number,\n' +
+    '  "playerRetreatFailStacks": number,\n' +
+    '  "nextTurn": "player"|"opponent",\n' +
+    '  "battleOver": boolean,\n' +
+    '  "winner": null|"player"|"opponent"\n' +
+    "}\n\n" +
+    "HP never below 0. Energy clamped 0..energyPoolMax each side. **Always include playerAttackGate** in resolve JSON: set to **null** when no gate, or repeat the same object if unchanged—so the client does not keep a stale trial." +
+    ANIME_TROPE_ABILITY_CATALOG_APPEND;
+
+  function extractTextFromGemini(json) {
+    var parts = json && json.candidates && json.candidates[0] && json.candidates[0].content && json.candidates[0].content.parts;
+    if (!parts || !parts.length) return "";
+    var t = "";
+    for (var i = 0; i < parts.length; i++) {
+      if (typeof parts[i].text === "string") t += parts[i].text;
+    }
+    return t;
+  }
+
+  function isEscapedDoubleQuote(str, pos) {
+    var n = 0;
+    for (var j = pos - 1; j >= 0 && str[j] === "\\"; j--) n++;
+    return n % 2 === 1;
+  }
+
+  function sanitizeJsonControlCharsInStrings(jsonStr) {
+    var out = "";
+    var inString = false;
+    var i = 0;
+    while (i < jsonStr.length) {
+      var c = jsonStr[i];
+      if (c === '"') {
+        if (inString && isEscapedDoubleQuote(jsonStr, i)) {
+          out += c;
+          i++;
+          continue;
+        }
+        inString = !inString;
+        out += c;
+        i++;
+        continue;
+      }
+      if (inString) {
+        if (c === "\r" && jsonStr[i + 1] === "\n") {
+          out += "\\n";
+          i += 2;
+          continue;
+        }
+        if (c === "\n" || c === "\r") {
+          out += "\\n";
+          i++;
+          continue;
+        }
+        if (c === "\t") {
+          out += "\\t";
+          i++;
+          continue;
+        }
+        var code = c.charCodeAt(0);
+        if (code >= 0 && code <= 31) {
+          out += "\\u" + ("000" + code.toString(16)).slice(-4);
+          i++;
+          continue;
+        }
+        if (code === 0x2028 || code === 0x2029) {
+          out += "\\n";
+          i++;
+          continue;
+        }
+      }
+      out += c;
+      i++;
+    }
+    return out;
+  }
+
+  function parseJsonFromModel(raw) {
+    var s = String(raw).trim();
+    var fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    var candidate = fence ? fence[1].trim() : s;
+    var start = candidate.indexOf("{");
+    var end = candidate.lastIndexOf("}");
+    if (start === -1 || end === -1 || end <= start) throw new Error("No JSON in response.");
+    var slice = candidate.slice(start, end + 1);
+    try {
+      return JSON.parse(slice);
+    } catch (e1) {
+      try {
+        return JSON.parse(sanitizeJsonControlCharsInStrings(slice));
+      } catch (e2) {
+        throw new Error((e1 && e1.message) || String(e1));
+      }
+    }
+  }
+
+  function apiPost(text) {
+    return fetch(WORKER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: text, mode: "prompt" }),
+    }).then(function (res) {
+      return res.json().then(function (data) {
+        if (!res.ok) throw new Error((data && data.error) || "HTTP " + res.status);
+        if (data.error) throw new Error(String(data.error));
+        var t = extractTextFromGemini(data);
+        if (!t) throw new Error("Empty AI response.");
+        return parseJsonFromModel(t);
+      });
+    });
+  }
+
+  var FIGHTER_CACHE_VERSION = 7;
+  var REGISTRY_KEY = "arena:registry:v7";
+  /* Upstash: this token is exposed in the browser—anyone can read/write these keys. Rotate the token in the Upstash console and prefer a small worker proxy for production. */
+  var UPSTASH_REDIS_REST_URL = "https://concrete-pup-76641.upstash.io";
+  var UPSTASH_REDIS_REST_TOKEN =
+    "gQAAAAAAASthAAIncDIyMWE3MGU3ZmQwMzU0NzcwODExMGFlYTQxYTM0NmYxMHAyNzY2NDE";
+
+  function fighterCacheKey(rawInput) {
+    var s = String(rawInput || "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, "_")
+      .replace(/[^a-z0-9_\-]/g, "")
+      .slice(0, 140);
+    return "arena:f" + FIGHTER_CACHE_VERSION + ":" + (s || "unknown");
+  }
+
+  /** Per-roster-slot moveset cache — never reuse fighterCacheKey(name), which collides with main fighter Redis keys. */
+  function companionMovesetCacheKey(rosterId, allyName) {
+    var idPart = String(rosterId || "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, "_")
+      .replace(/[^a-z0-9_\-]/g, "")
+      .slice(0, 100);
+    if (!idPart) {
+      var ns = String(allyName || "")
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, "_")
+        .replace(/[^a-z0-9_\-]/g, "")
+        .slice(0, 80);
+      idPart = "n_" + (ns || "unknown");
+    }
+    return "arena:f" + FIGHTER_CACHE_VERSION + ":companion:" + idPart;
+  }
+
+  function parseFighterCache(result) {
+    if (result == null || result === "") return null;
+    try {
+      var o = typeof result === "string" ? JSON.parse(result) : result;
+      if (!o || (o.v !== FIGHTER_CACHE_VERSION && o.v !== 6)) return null;
+      if (!o.fighter || !o.moveChart || !o.abilities) return null;
+      return o;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function deepClone(o) {
+    return JSON.parse(JSON.stringify(o));
+  }
+
+  function buildMergedSetupFromCache(cYou, cOpp, firstVal, arena, youRaw, oppRaw) {
+    var sameKey =
+      youRaw != null &&
+      oppRaw != null &&
+      fighterCacheKey(youRaw) === fighterCacheKey(oppRaw);
+    var py = deepClone(cYou.fighter);
+    var po = sameKey ? deepClone(cYou.fighter) : deepClone(cOpp.fighter);
+    var chartY = deepClone(cYou.moveChart);
+    var chartO = sameKey ? deepClone(cYou.moveChart) : deepClone(cOpp.moveChart);
+    var abY = deepClone(cYou.abilities);
+    var abO = sameKey ? deepClone(cYou.abilities) : deepClone(cOpp.abilities);
+    return {
+      player: py,
+      opponent: po,
+      playerMoveChart: chartY,
+      opponentMoveChart: chartO,
+      playerAbilities: abY,
+      opponentAbilities: abO,
+      playerActiveFormId: null,
+      opponentActiveFormId: null,
+      playerPassiveStacks: [],
+      opponentPassiveStacks: [],
+      playerStatuses: [],
+      opponentStatuses: [],
+      fatiguePlayer: 0,
+      fatigueOpponent: 0,
+      introNarrative:
+        String(arena || "").trim() ||
+        "Cached loadout — " + (py.name || "?") + " vs " + (po.name || "?") + ".",
+      firstTurn: firstVal,
+      playerCompanionRoster: rosterFromCacheBundle(cYou),
+      playerCompanions: Array.isArray(cYou.companions) && cYou.companions.length ? deepClone(cYou.companions) : [],
+      opponentCompanionRoster: rosterFromCacheBundle(cOpp),
+      opponentCompanions: Array.isArray(cOpp.companions) && cOpp.companions.length ? deepClone(cOpp.companions) : [],
+    };
+  }
+
+  function rosterFromCacheBundle(cached) {
+    if (!cached) return [];
+    if (Array.isArray(cached.companionRoster) && cached.companionRoster.length) return deepClone(cached.companionRoster);
+    if (Array.isArray(cached.companions) && cached.companions.length) {
+      return cached.companions.slice(0, 4).map(function (c) {
+        if (!c || !c.name) return null;
+        return {
+          id: String(c.id || c.name).replace(/\s+/g, "_"),
+          name: String(c.name),
+          series: String(c.series || ""),
+        };
+      }).filter(Boolean);
+    }
+    return [];
+  }
+
+  function applyCachedFighterToSetup(d, role, cached) {
+    if (!cached || !cached.fighter || !cached.moveChart || !cached.abilities) return;
+    var f = deepClone(cached.fighter);
+    var chart = deepClone(cached.moveChart);
+    var ab = deepClone(cached.abilities);
+    if (role === "player") {
+      d.player = f;
+      d.playerMoveChart = chart;
+      d.playerAbilities = ab;
+      d.playerPassiveStacks = [];
+      if (cached.companionRoster && cached.companionRoster.length) d.playerCompanionRoster = deepClone(cached.companionRoster);
+      if (cached.companions && cached.companions.length) d.playerCompanions = deepClone(cached.companions);
+      var dp = Number(f.durabilityPoints);
+      var pem = Number(f.energyPoolMax);
+      if (isFinite(dp) && dp > 0) d.playerMaxHp = maxHpFromDurability(dp);
+      if (isFinite(pem) && pem > 0) {
+        d.playerEnergy = pem;
+        if (d.player && d.player.energyPoolMax == null) d.player.energyPoolMax = pem;
+      }
+    } else {
+      d.opponent = f;
+      d.opponentMoveChart = chart;
+      d.opponentAbilities = ab;
+      d.opponentPassiveStacks = [];
+      var op = Number(f.durabilityPoints);
+      var oem = Number(f.energyPoolMax);
+      if (isFinite(op) && op > 0) d.opponentMaxHp = maxHpFromDurability(op);
+      if (isFinite(oem) && oem > 0) {
+        d.opponentEnergy = oem;
+        if (d.opponent && d.opponent.energyPoolMax == null) d.opponent.energyPoolMax = oem;
+      }
+    }
+  }
+
+  function syncMirrorSameFighterKey(d, youRaw, oppRaw) {
+    if (fighterCacheKey(youRaw) !== fighterCacheKey(oppRaw)) return;
+    d.opponent = deepClone(d.player);
+    d.opponentMoveChart = deepClone(d.playerMoveChart);
+    d.opponentAbilities = deepClone(d.playerAbilities);
+    d.opponentPassiveStacks = Array.isArray(d.playerPassiveStacks) ? deepClone(d.playerPassiveStacks) : [];
+    d.opponentCompanionRoster = Array.isArray(d.playerCompanionRoster) ? deepClone(d.playerCompanionRoster) : [];
+    d.opponentCompanions = Array.isArray(d.playerCompanions) ? deepClone(d.playerCompanions) : [];
+    var op = Number(d.opponent.durabilityPoints);
+    var oem = Number(d.opponent.energyPoolMax);
+    if (isFinite(op) && op > 0) d.opponentMaxHp = maxHpFromDurability(op);
+    if (isFinite(oem) && oem > 0) d.opponentEnergy = oem;
+  }
+
+  function mergeApiSetupWithRedis(d, cacheYou, cacheOpp, youRaw, oppRaw) {
+    if (!d) return d;
+    if (cacheYou) applyCachedFighterToSetup(d, "player", cacheYou);
+    if (cacheOpp) applyCachedFighterToSetup(d, "opponent", cacheOpp);
+    if ((!d.playerCompanionRoster || !d.playerCompanionRoster.length) && cacheYou) {
+      var rFrom = rosterFromCacheBundle(cacheYou);
+      if (rFrom.length) d.playerCompanionRoster = rFrom;
+    }
+    if ((!d.playerCompanions || !d.playerCompanions.length) && cacheYou && cacheYou.companions && cacheYou.companions.length) {
+      d.playerCompanions = deepClone(cacheYou.companions);
+    }
+    if (cacheOpp) {
+      var rOpp = rosterFromCacheBundle(cacheOpp);
+      if (rOpp.length && (!d.opponentCompanionRoster || !d.opponentCompanionRoster.length))
+        d.opponentCompanionRoster = deepClone(rOpp);
+      if ((!d.opponentCompanions || !d.opponentCompanions.length) && cacheOpp.companions && cacheOpp.companions.length) {
+        d.opponentCompanions = deepClone(cacheOpp.companions);
+      }
+    }
+    syncMirrorSameFighterKey(d, youRaw, oppRaw);
+    return d;
+  }
+
+  function redisUpstash(cmd) {
+    if (!UPSTASH_REDIS_REST_TOKEN || !UPSTASH_REDIS_REST_URL) {
+      return Promise.reject(new Error("no-redis"));
+    }
+    return fetch(UPSTASH_REDIS_REST_URL, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer " + UPSTASH_REDIS_REST_TOKEN,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(cmd),
+    }).then(function (res) {
+      return res.json().then(function (data) {
+        if (data.error) throw new Error(String(data.error));
+        return data;
+      });
+    });
+  }
+
+  function redisGetKey(key) {
+    return redisUpstash(["GET", key])
+      .then(function (data) {
+        return data.result != null ? data.result : null;
+      })
+      .catch(function () {
+        return null;
+      });
+  }
+
+  function redisSetKey(key, value) {
+    return redisUpstash(["SET", key, value]).catch(function () {});
+  }
+
+  function readRegistry() {
+    return redisGetKey(REGISTRY_KEY)
+      .then(function (raw) {
+        if (!raw) return [];
+        try {
+          var a = JSON.parse(raw);
+          return Array.isArray(a) ? a : [];
+        } catch (e) {
+          return [];
+        }
+      })
+      .catch(function () {
+        return [];
+      });
+  }
+
+  function persistFightersToRedis(keyYou, keyOpp) {
+    if (!UPSTASH_REDIS_REST_TOKEN || !state) return;
+    var comps = state.playerCompanions || [];
+    var p1 = JSON.stringify({
+      v: FIGHTER_CACHE_VERSION,
+      fighter: state.player,
+      moveChart: state.playerMoveChart,
+      abilities: state.playerAbilities,
+      companionRoster: state.playerCompanionRoster || [],
+      companions: comps,
+    });
+    var p2 = JSON.stringify({
+      v: FIGHTER_CACHE_VERSION,
+      fighter: state.opponent,
+      moveChart: state.opponentMoveChart,
+      abilities: state.opponentAbilities,
+    });
+    var reg = [];
+    function addReg(k, name, type) {
+      if (!k) return;
+      reg.push({ k: k, name: String(name || ""), type: type });
+    }
+    addReg(keyYou, state.player && state.player.name, "fighter");
+    addReg(keyOpp, state.opponent && state.opponent.name, "fighter");
+    comps.forEach(function (c) {
+      if (!c || !c.name) return;
+      var rid = String(c.id != null && String(c.id).trim() !== "" ? c.id : c.name).replace(/\s+/g, "_");
+      var ck = companionMovesetCacheKey(rid, c.name);
+      redisSetKey(
+        ck,
+        JSON.stringify({
+          v: FIGHTER_CACHE_VERSION,
+          fighter: {
+            name: c.name,
+            series: c.series || "",
+            wikiTierLabel: c.wikiTierLabel || "",
+            offensePoints: c.offensePoints,
+            durabilityPoints: c.durabilityPoints,
+            speedPoints: c.speedPoints,
+            staminaPoints: c.staminaPoints,
+            healingPoints: c.healingPoints,
+            energyPoolMax: c.energyPoolMax,
+          },
+          moveChart: c.moveChart,
+          abilities: c.abilities,
+          companion: true,
+          companionRosterId: rid,
+        })
+      );
+      addReg(ck, c.name, "companion");
+    });
+    redisGetKey(REGISTRY_KEY)
+      .then(function (raw) {
+        var arr = [];
+        try {
+          arr = raw ? JSON.parse(raw) : [];
+        } catch (e) {}
+        if (!Array.isArray(arr)) arr = [];
+        var seen = {};
+        arr.forEach(function (x) {
+          if (x && x.k) seen[x.k] = true;
+        });
+        reg.forEach(function (e) {
+          if (e.k && !seen[e.k]) {
+            arr.push(e);
+            seen[e.k] = true;
+          }
+        });
+        return redisSetKey(REGISTRY_KEY, JSON.stringify(arr.slice(-400)));
+      })
+      .catch(function () {});
+    if (keyYou === keyOpp) {
+      redisSetKey(keyYou, p1);
+      return;
+    }
+    redisSetKey(keyYou, p1);
+    redisSetKey(keyOpp, p2);
+  }
+
+  var state = null;
+  var _lastYouFormId = null;
+  var _lastOppFormId = null;
+
+  function fmtNum(n) {
+    if (!isFinite(n)) return "?";
+    var x = Math.abs(n);
+    if (x >= 1e12) return (n / 1e12).toFixed(2) + "T";
+    if (x >= 1e9) return (n / 1e9).toFixed(2) + "B";
+    if (x >= 1e6) return (n / 1e6).toFixed(2) + "M";
+    if (x >= 1e3) return (n / 1e3).toFixed(1) + "k";
+    return String(Math.round(n));
+  }
+
+  function pctFill(curr, max) {
+    var c = Number(curr);
+    var m = Number(max);
+    if (!isFinite(c) || !isFinite(m) || m <= 0) return "0%";
+    return Math.round(clamp((c / m) * 100, 0, 100)) + "%";
+  }
+
+  function clamp(n, lo, hi) {
+    return Math.max(lo, Math.min(hi, n));
+  }
+
+  /** Match HP pool to durability (superlinear): tougher fighters get much larger HP; resolves use % maxHp so damage pace stays readable. */
+  function maxHpFromDurability(durabilityPoints) {
+    var d = Math.max(1, Number(durabilityPoints) || 1);
+    var raw = 180 * Math.pow(d, 1.28) + 80 * d;
+    return Math.max(600, Math.round(raw));
+  }
+
+  function setSetupErr(msg) {
+    var el = document.getElementById("setupErr");
+    if (!msg) {
+      el.hidden = true;
+      el.textContent = "";
+      return;
+    }
+    el.hidden = false;
+    el.textContent = msg;
+  }
+
+  function setGameErr(msg) {
+    var el = document.getElementById("gameErr");
+    if (!msg) {
+      el.hidden = true;
+      el.textContent = "";
+      return;
+    }
+    el.hidden = false;
+    el.textContent = msg;
+  }
+
+  function normalizeStacks(raw, fallbackFromPassives, side) {
+    var arr = Array.isArray(raw) ? raw : [];
+    if (arr.length === 0 && fallbackFromPassives && fallbackFromPassives.length) {
+      arr = fallbackFromPassives.map(function (p) {
+        return {
+          id: p.id || "p",
+          label: p.label || "",
+          stacks: 0,
+          maxStacks: p.maxStacks != null ? p.maxStacks : null,
+        };
+      });
+    }
+    return arr.map(function (x) {
+      return {
+        id: String(x.id || ""),
+        label: String(x.label || ""),
+        stacks: Math.max(0, Math.round(Number(x.stacks) || 0)),
+        maxStacks: x.maxStacks == null ? null : Number(x.maxStacks),
+      };
+    });
+  }
+
+  function normalizeStatuses(raw) {
+    if (!Array.isArray(raw)) return [];
+    return raw.map(function (s) {
+      return {
+        type: String(s.type || ""),
+        intensity: clamp(Number(s.intensity) || 1, 1, 9),
+        turnsLeft: Math.max(0, Math.round(Number(s.turnsLeft) || 0)),
+        label: String(s.label || s.type || ""),
+      };
+    });
+  }
+
+  function canUseMoveForm(onlyInFormIds, activeFormId) {
+    if (!onlyInFormIds || !onlyInFormIds.length) return true;
+    if (!activeFormId) return false;
+    return onlyInFormIds.indexOf(activeFormId) !== -1;
+  }
+
+  function getThreatTierMeta(fighter) {
+    var id = String((fighter && fighter.threatTier) || "")
+      .toLowerCase()
+      .trim();
+    var list = THREAT_TIER_LIST;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === id) return list[i];
+    }
+    var r = Number(fighter && fighter.threatRank);
+    if (isFinite(r) && r >= 1) {
+      var idx = clamp(Math.round(r), 1, list.length) - 1;
+      return list[idx];
+    }
+    return list[1];
+  }
+
+  function letterGradeFromTierRatio(ratio) {
+    var r = Number(ratio);
+    if (!isFinite(r) || r <= 0) return "—";
+    if (r >= 2.2) return "S+";
+    if (r >= 1.65) return "S";
+    if (r >= 1.25) return "A";
+    if (r >= 0.95) return "B";
+    if (r >= 0.7) return "C";
+    if (r >= 0.45) return "D";
+    return "F";
+  }
+
+  function statGradeFromOpenPoints(openVal) {
+    var v = Number(openVal);
+    if (!isFinite(v) || v <= 0) return 0;
+    return clamp((100 * Math.log10(Math.max(10, v))) / 12, 0, 100);
+  }
+
+  function letterFromFeatGrade(g) {
+    var x = Number(g);
+    if (!isFinite(x) || x <= 0) return "—";
+    if (x >= 92) return "S+";
+    if (x >= 84) return "S";
+    if (x >= 72) return "A";
+    if (x >= 58) return "B";
+    if (x >= 42) return "C";
+    if (x >= 24) return "D";
+    return "F";
+  }
+
+  function normalizeFormStatModifiers(raw) {
+    var d = raw && typeof raw === "object" ? raw : {};
+    function pick(k, alt) {
+      var v = d[k] != null ? d[k] : d[alt];
+      var n = Number(v);
+      return isFinite(n) && n > 0 ? clamp(n, 0.15, 80) : 1;
+    }
+    return {
+      offenseMult: pick("offenseMult", "offenseModifier"),
+      speedMult: pick("speedMult", "speedModifier"),
+      durabilityMult: pick("durabilityMult", "durabilityModifier"),
+      staminaMult: pick("staminaMult", "staminaModifier"),
+      healingMult: pick("healingMult", "healingModifier"),
+      energyPoolMult: pick("energyPoolMult", "energyModifier"),
+    };
+  }
+
+  function getFormById(abilities, formId) {
+    if (!formId || !abilities || !abilities.forms) return null;
+    for (var i = 0; i < abilities.forms.length; i++) {
+      if (abilities.forms[i].id === formId) return abilities.forms[i];
+    }
+    return null;
+  }
+
+  function getFormStatMods(abilities, activeFormId) {
+    var f = getFormById(abilities, activeFormId);
+    if (f && f.statModifiers) return f.statModifiers;
+    return {
+      offenseMult: 1,
+      speedMult: 1,
+      durabilityMult: 1,
+      staminaMult: 1,
+      healingMult: 1,
+      energyPoolMult: 1,
+    };
+  }
+
+  function canActivateForm(form, activeFormId) {
+    var req = form && form.requiresFormIds;
+    if (!req || !req.length) return true;
+    if (!activeFormId) return false;
+    return req.indexOf(activeFormId) !== -1;
+  }
+
+  function getEffectiveEnergyCap(side) {
+    if (!state) return 0;
+    var base = side === "you" ? state.playerEnergyMax : state.opponentEnergyMax;
+    var ab = side === "you" ? state.playerAbilities : state.opponentAbilities;
+    var fid = side === "you" ? state.playerActiveFormId : state.opponentActiveFormId;
+    var m = getFormStatMods(ab, fid).energyPoolMult;
+    return Math.max(1, Math.round((Number(base) || 0) * m));
+  }
+
+  function getPlayerCombatModeSpec() {
+    if (!state) return COMBAT_MODES.normal;
+    var id = String(state.playerCombatMode || "normal").toLowerCase();
+    return COMBAT_MODES[id] || COMBAT_MODES.normal;
+  }
+
+  function isRageStance() {
+    return !!(state && String(state.playerCombatMode || "").toLowerCase() === "rage");
+  }
+
+  function isGuardStance() {
+    return !!(state && String(state.playerCombatMode || "").toLowerCase() === "defensive");
+  }
+
+  function isChargeStance() {
+    return !!(state && String(state.playerCombatMode || "").toLowerCase() === "charge");
+  }
+
+  function updateStanceActionButtons() {
+    if (!state || state.over || state._actionUiLocked) return;
+    var atk = document.getElementById("btnAttack");
+    var ret = document.getElementById("btnRetreat");
+    var pf = document.getElementById("btnPlanFeint");
+    var guard = isGuardStance();
+    var rage = isRageStance();
+    var charge = isChargeStance();
+    var gate = state.playerAttackGate && state.playerAttackGate.kind === "rps_shoot";
+    if (atk) {
+      var atkDis = guard && !gate;
+      atk.disabled = atkDis;
+      atk.title = atkDis
+        ? "Guard: no attacks. Use Abilities, Support, or Retreat—or change stance. (Active trial still uses Attack for RPS.)"
+        : "";
+    }
+    if (ret) {
+      var noRet = rage || charge;
+      ret.disabled = noRet;
+      ret.title = noRet
+        ? rage
+          ? "Rage: no retreat. Change stance or use Attack / Abilities / Support."
+          : "Charge: no retreat. Change stance or use Attack / Abilities / Support."
+        : "";
+    }
+    if (pf) {
+      pf.disabled = rage || charge;
+      pf.title = rage || charge
+        ? "Feint needs Retreat — unavailable in Rage / Charge."
+        : "Next Retreat is a feint (fake-out, then pull back).";
+    }
+  }
+
+  function effectiveIntelligenceGrade(fighter) {
+    if (!fighter) return 50;
+    var g = Number(fighter.intelligenceGrade);
+    return isFinite(g) ? clamp(g, 0, 100) : 50;
+  }
+
+  function predictDistractSuccessChance() {
+    if (!state) return 0.45;
+    var pIQ = effectiveIntelligenceGrade(state.player);
+    var oIQ = effectiveIntelligenceGrade(state.opponent);
+    var base = 0.4 + ((pIQ - oIQ) / 100) * 0.38;
+    var resist = (state.opponentDistractResistance || 0) * 0.11;
+    return clamp(base - resist, 0.06, 0.88);
+  }
+
+  function predictFeintSuccessChance() {
+    if (!state) return 0.45;
+    var pIQ = effectiveIntelligenceGrade(state.player);
+    var oIQ = effectiveIntelligenceGrade(state.opponent);
+    var base = 0.4 + ((pIQ - oIQ) / 100) * 0.34;
+    var resist = (state.opponentDistractResistance || 0) * 0.07;
+    var momentum = (state.playerRetreatFailStacks || 0) * 0.05;
+    return clamp(base - resist + momentum, 0.1, 0.9);
+  }
+
+  function buildPlanContextSnapshot() {
+    if (!state) return {};
+    return {
+      playerIntelligence: effectiveIntelligenceGrade(state.player),
+      opponentIntelligence: effectiveIntelligenceGrade(state.opponent),
+      opponentDistractResistance: state.opponentDistractResistance || 0,
+      distractSuccessChanceHint: predictDistractSuccessChance(),
+      feintSuccessChanceHint: predictFeintSuccessChance(),
+      playerRetreatFailStacks: state.playerRetreatFailStacks || 0,
+    };
+  }
+
+  function fmtStanceMult(n) {
+    var x = Number(n);
+    if (!isFinite(x)) return "?";
+    var r = Math.round(x * 100) / 100;
+    if (Math.abs(r - Math.round(r)) < 0.001) return String(Math.round(r));
+    return r.toFixed(2).replace(/\.?0+$/, "");
+  }
+
+  function buildResolveEffectiveSnapshot(side) {
+    if (!state) return {};
+    var f = side === "you" ? state.player : state.opponent;
+    var ab = side === "you" ? state.playerAbilities : state.opponentAbilities;
+    var fid = side === "you" ? state.playerActiveFormId : state.opponentActiveFormId;
+    var sm = getFormStatMods(ab, fid);
+    var op = Number(f.offensePoints) || 0;
+    var dp = Number(f.durabilityPoints) || 0;
+    var sp = Number(f.speedPoints) || 0;
+    var st = Number(f.staminaPoints) || 0;
+    var hl = Number(f.healingPoints) || 0;
+    var off = op * sm.offenseMult;
+    var dur = dp * sm.durabilityMult;
+    var mode = getPlayerCombatModeSpec();
+    if (side === "you") {
+      off *= mode.attackMult;
+      dur *= mode.durabilityMult;
+    }
+    return {
+      activeFormId: fid,
+      offenseEffective: off,
+      durabilityEffective: dur,
+      speedEffective: sp * sm.speedMult,
+      staminaEffective: st * sm.staminaMult,
+      healingEffective: hl * sm.healingMult,
+      formAttackMultiplier: getFormAttackMultiplier(ab, fid),
+      energyPoolEffective: getEffectiveEnergyCap(side),
+      playerCombatMode: side === "you" ? mode.id : null,
+      combatModeAttackMult: side === "you" ? mode.attackMult : 1,
+      combatModeDurabilityMult: side === "you" ? mode.durabilityMult : 1,
+      combatModeEnergyMult: side === "you" ? mode.energyMult : 1,
+    };
+  }
+
+  function energyFromPercent(poolMax, pct) {
+    return Math.ceil((Number(poolMax) || 0) * (clamp(Number(pct), 1, 100) / 100));
+  }
+
+  function playerEnergyCostFromPercent(poolMax, pct) {
+    var base = energyFromPercent(poolMax, pct);
+    var m = getPlayerCombatModeSpec().energyMult;
+    return Math.max(1, Math.ceil(base * m));
+  }
+
+  function getFormAttackMultiplier(abilities, activeFormId) {
+    if (!activeFormId || !abilities || !abilities.forms || !abilities.forms.length) return 1;
+    for (var i = 0; i < abilities.forms.length; i++) {
+      if (abilities.forms[i].id === activeFormId) return clamp(Number(abilities.forms[i].attackMultiplier) || 1, 0.5, 25);
+    }
+    return 1;
+  }
+
+  function gradeToBadgeClass(letter) {
+    if (letter === "S+") return "grade-splus";
+    if (letter === "S") return "grade-s";
+    if (letter === "A") return "grade-a";
+    if (letter === "B") return "grade-b";
+    if (letter === "C") return "grade-c";
+    if (letter === "D") return "grade-d";
+    if (letter === "—") return "grade-na";
+    return "grade-f";
+  }
+
+  function buildGradedFighterPanel(side) {
+    var f = side === "you" ? state.player : state.opponent;
+    var chart = side === "you" ? state.playerMoveChart : state.opponentMoveChart;
+    var ab = side === "you" ? state.playerAbilities : state.opponentAbilities;
+    var energyCap = side === "you" ? state.playerEnergyMax : state.opponentEnergyMax;
+    var tier = getThreatTierMeta(f);
+    var wikiLab = String(f.wikiTierLabel || "").trim();
+    var wikiMac = String(f.wikiTierMacro || "").trim();
+    var haxN = Number(f.haxTier);
+    if (!isFinite(haxN)) haxN = Number(f.scalingHaxTier);
+    var featCons = Number(f.featConsistency);
+    var cls = side === "you" ? "you" : "opp";
+    var h = '<div class="stats-compare-panel ' + cls + '">';
+    h += "<h3>" + escapeHtml(f.name || "?") + "</h3>";
+    h += '<div class="series">' + escapeHtml(f.series || "—") + "</div>";
+    if (wikiLab || wikiMac) {
+      h +=
+        '<div class="wiki-tier-badge" title="VS Battle Wiki-style overall tier (model-assigned)">' +
+        escapeHtml(wikiLab || wikiMac || "?") +
+        (wikiMac && wikiLab ? " · " + escapeHtml(wikiMac) : "") +
+        "</div>";
+    }
+    h +=
+      '<div class="threat-badge" title="Legacy slug tier (floor reference)">' +
+      escapeHtml(tier.label) +
+      (f.threatLabel ? " · " + escapeHtml(String(f.threatLabel)) : "") +
+      "</div>";
+    if (isFinite(haxN)) {
+      h += '<div class="scaling-meta">Hax tier: ' + escapeHtml(String(clamp(Math.round(haxN), 0, 10))) + " / 10</div>";
+    }
+    if (isFinite(featCons)) {
+      h += '<div class="scaling-meta">Feat consistency: ' + escapeHtml(String(Math.round(clamp(featCons, 0, 1) * 100))) + "%</div>";
+    }
+    var ig = Number(f.intelligenceGrade);
+    var sg = Number(f.specialGrade);
+    if (isFinite(ig) && ig > 0) {
+      h +=
+        '<div class="scaling-meta">Intelligence (model): ~' +
+        escapeHtml(ig.toFixed(0)) +
+        "/100</div>";
+    }
+    if (isFinite(sg) && sg > 0) {
+      h +=
+        '<div class="scaling-meta">Special / hax grade (model): ~' +
+        escapeHtml(sg.toFixed(0)) +
+        "/100</div>";
+    }
+    h +=
+      '<p class="graded-sub">Bars = logarithmic feat grade 0–100 from open-point composite (100*log10(points)/12). Letters map from that grade. Slug tier floors still shown under each row for context.</p>';
+    h += '<h4 class="graded-section-title">Combat ratings (feat composites)</h4>';
+
+    var gradedRows = [
+      { label: "Durability", val: f.durabilityPoints, floor: tier.floorDura },
+      { label: "Offense", val: f.offensePoints, floor: tier.floorOff },
+      { label: "Speed", val: f.speedPoints, floor: tier.floorSpd },
+      { label: "Stamina", val: f.staminaPoints, floor: tier.floorSta },
+      { label: "Healing", val: f.healingPoints || 0, floor: Math.max(0.5, tier.floorHeal) },
+      { label: "Energy pool", val: energyCap, floor: tier.floorEn },
+    ];
+
+    gradedRows.forEach(function (row) {
+      var v = Number(row.val) || 0;
+      var fl = Math.max(Number(row.floor) || 1, 0.01);
+      var ratio = v / fl;
+      var tierLetter = letterGradeFromTierRatio(ratio);
+      var featG = statGradeFromOpenPoints(v);
+      var grade = letterFromFeatGrade(featG);
+      var pct = clamp(featG, 0, 100);
+      var gClass = gradeToBadgeClass(grade);
+      h += '<div class="stat-grade-row">';
+      h += '<div class="stat-grade-head"><span>' + escapeHtml(row.label) + '</span>';
+      h += '<span class="grade-badge ' + gClass + '">' + escapeHtml(grade) + "</span></div>";
+      h += '<div class="stat-grade-bar"><div class="stat-grade-fill" style="width:' + pct.toFixed(1) + '%"></div></div>';
+      h +=
+        '<div class="stat-grade-raw">' +
+        fmtNum(v) +
+        " composite · feat grade " +
+        featG.toFixed(1) +
+        "/100 · vs slug floor " +
+        fmtNum(fl) +
+        " (" +
+        escapeHtml(tierLetter) +
+        ")</div>";
+      h += "</div>";
+    });
+
+    var notes = String(f.notes || "").trim();
+    if (notes) {
+      h +=
+        '<div class="fighter-notes-block"><strong>Analyst notes</strong>' +
+        escapeHtml(notes).replace(/\n/g, "<br>") +
+        "</div>";
+    }
+
+    h += '<div class="loadout-mini-title">Loadout summary</div>';
+    h += "<table class='stats-compare-table'>";
+    function tr2(label, val) {
+      h += "<tr><th>" + escapeHtml(label) + '</th><td class="val">' + escapeHtml(String(val)) + "</td></tr>";
+    }
+    MOVE_CATS.forEach(function (c) {
+      tr2(c + " attacks", (chart[c] || []).length);
+    });
+    tr2("Forms", ab.forms.length);
+    tr2("Non-attack abilities", ab.nonAttack.length);
+    tr2("Passives", (f.passives || []).length);
+    h += "</table></div>";
+    return h;
+  }
+
+  function openStatsCompare() {
+    if (!state) return;
+    document.getElementById("statsCompareBody").innerHTML =
+      buildGradedFighterPanel("you") + buildGradedFighterPanel("opp");
+    document.getElementById("statsCompareOverlay").removeAttribute("hidden");
+  }
+
+  function closeStatsCompare() {
+    document.getElementById("statsCompareOverlay").setAttribute("hidden", "");
+  }
+
+  function updateFormDisplay() {
+    if (!state) return;
+    var pf = state.playerActiveFormId ? "Form: " + state.playerActiveFormId : "Base form";
+    var of = state.opponentActiveFormId ? "Form: " + state.opponentActiveFormId : "Base form";
+    var yEl = document.getElementById("youFormLine");
+    var oEl = document.getElementById("oppFormLine");
+    yEl.textContent = pf;
+    oEl.textContent = of;
+    if (state.playerActiveFormId !== _lastYouFormId) {
+      yEl.classList.remove("form-shift");
+      void yEl.offsetWidth;
+      yEl.classList.add("form-shift");
+    }
+    if (state.opponentActiveFormId !== _lastOppFormId) {
+      oEl.classList.remove("form-shift");
+      void oEl.offsetWidth;
+      oEl.classList.add("form-shift");
+    }
+    _lastYouFormId = state.playerActiveFormId;
+    _lastOppFormId = state.opponentActiveFormId;
+    var gs = document.getElementById("gameScreen");
+    if (!gs || !gs.classList.contains("online-arena-min")) {
+      var sy = document.getElementById("spriteYou");
+      var so = document.getElementById("spriteOpp");
+      function spriteLabel(n) {
+        var s = String(n || "?").trim();
+        if (s.length <= 22) return s.toUpperCase();
+        return (s.slice(0, 20) + "…").toUpperCase();
+      }
+      if (sy) sy.textContent = spriteLabel(state.player.name || "You");
+      if (so) so.textContent = spriteLabel(state.opponent.name || "Foe");
+    }
+  }
+
+  function renderAttackGrid() {
+    if (!state) return;
+    var el = document.getElementById("attackMoveGrid");
+    var chart = state.playerMoveChart;
+    var pool = getEffectiveEnergyCap("you");
+    var en = state.playerEnergy;
+    var formId = state.playerActiveFormId;
+    var formMult = getFormAttackMultiplier(state.playerAbilities, formId);
+    var sm = getFormStatMods(state.playerAbilities, formId);
+    var lastCat = String(state.playerLastMoveCategory || "").toLowerCase();
+    var heavyRepeatLock = lastCat === "heavy";
+    var mode = getPlayerCombatModeSpec();
+    var h = "";
+    MOVE_CATS.forEach(function (cat) {
+      var label = cat.charAt(0).toUpperCase() + cat.slice(1);
+      var moves = chart[cat] || [];
+      h += '<div class="move-row-label">' + escapeHtml(label) + "</div>";
+      if (!moves.length) {
+        h += '<div class="empty-row-note">No canon moves in this row.</div>';
+        return;
+      }
+      h += '<div class="move-row-btns">';
+      moves.forEach(function (m) {
+        var okForm = canUseMoveForm(m.onlyInFormIds, formId);
+        var cost = playerEnergyCostFromPercent(pool, m.energyPercent);
+        var heavyBanRow = cat === "heavy" && (heavyRepeatLock || mode.blockHeavy);
+        var can = okForm && en >= cost && !heavyBanRow;
+        var dis = can ? "" : " disabled";
+        var titleAttr = "";
+        if (heavyRepeatLock && cat === "heavy" && okForm && en >= cost) titleAttr = ' title="Heavy moves cannot be used twice in a row."';
+        else if (mode.blockHeavy && cat === "heavy" && okForm && en >= cost) titleAttr = ' title="Charge stance: heavy attacks disabled."';
+        var tf = m.techniqueFactor != null ? Number(m.techniqueFactor) : 0.35;
+        var pctMove = clamp(Math.round(Number(m.energyPercent) || 5), 1, 100);
+        var multNote =
+          formMult > 1 && formId
+            ? " · ×" + formMult.toFixed(2) + " form"
+            : sm.offenseMult !== 1
+              ? " · ×" + sm.offenseMult.toFixed(2) + " off"
+              : "";
+        var stanceNote = mode.id !== "normal" ? " · " + mode.id : "";
+        h +=
+          '<button type="button" class="btn-move"' +
+          dis +
+          titleAttr +
+          ' data-kind="attack" data-cat="' +
+          escapeHtml(cat) +
+          '" data-id="' +
+          escapeHtml(m.id) +
+          '">' +
+          escapeHtml(m.name) +
+          '<span class="ep">' +
+          pctMove +
+          "% pool · tech " +
+          fmtNum(tf) +
+          multNote +
+          stanceNote +
+          "</span></button>";
+      });
+      h += "</div>";
+    });
+    el.innerHTML = h;
+    el.querySelectorAll("button.btn-move:not([disabled])").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var cat = btn.getAttribute("data-cat");
+        var id = btn.getAttribute("data-id");
+        document.getElementById("sheetAttack").classList.remove("is-open");
+        submitPlayerAction({ type: "attack", category: cat, moveId: id });
+      });
+    });
+  }
+
+  function renderAbilityGrid() {
+    if (!state) return;
+    var formsEl = document.getElementById("abilityFormsBlock");
+    var otherEl = document.getElementById("abilityOtherBlock");
+    var ab = state.playerAbilities;
+    var pool = getEffectiveEnergyCap("you");
+    var en = state.playerEnergy;
+    var formId = state.playerActiveFormId;
+    var hf = '<div class="move-row-label">Forms / transformations (full turn)</div>';
+    if (!ab.forms.length) {
+      hf += '<div class="empty-row-note">None listed for this fighter.</div>';
+    } else {
+      hf += '<div class="move-row-btns">';
+      ab.forms.forEach(function (f) {
+        var cost = playerEnergyCostFromPercent(pool, f.energyPercent);
+        var chainOk = canActivateForm(f, formId);
+        var can = chainOk && en >= cost;
+        var am = f.attackMultiplier != null ? Number(f.attackMultiplier) : 1;
+        var mods = f.statModifiers || normalizeFormStatModifiers(null);
+        var modHint =
+          mods.offenseMult !== 1 || mods.speedMult !== 1
+            ? " · stats ×" + mods.offenseMult.toFixed(2) + "/" + mods.speedMult.toFixed(2)
+            : "";
+        var reqHint =
+          f.requiresFormIds && f.requiresFormIds.length
+            ? " · needs " + f.requiresFormIds.map(escapeHtml).join(", ")
+            : "";
+        hf +=
+          '<button type="button" class="btn-move"' +
+          (can ? "" : " disabled") +
+          ' data-kind="form" data-id="' +
+          escapeHtml(f.id) +
+          '" title="' +
+          escapeHtml((f.description || "") + reqHint) +
+          '">' +
+          escapeHtml(f.name) +
+          '<span class="ep">' +
+          clamp(Math.round(Number(f.energyPercent) || 10), 1, 100) +
+          "% pool · ×" +
+          clamp(am, 0.5, 25).toFixed(2) +
+          " dmg" +
+          modHint +
+          "</span></button>";
+      });
+      hf += "</div>";
+    }
+    formsEl.innerHTML = hf;
+
+    var ho = '<div class="move-row-label">Non-attack abilities</div>';
+    if (!ab.nonAttack.length) {
+      ho += '<div class="empty-row-note">None listed for this fighter.</div>';
+    } else {
+      ho += '<div class="move-row-btns">';
+      ab.nonAttack.forEach(function (a) {
+        var okForm = canUseMoveForm(a.onlyInFormIds, formId);
+        var cost = playerEnergyCostFromPercent(pool, a.energyPercent);
+        var can = okForm && en >= cost;
+        var meta =
+          (a.buffTargets ? " · " + a.buffTargets : "") +
+          (a.statusGrantSelf && a.statusGrantSelf.length ? " · self status" : "");
+        var tip = escapeHtml((a.description || "") + meta);
+        ho +=
+          '<button type="button" class="btn-move"' +
+          (can ? "" : " disabled") +
+          ' data-kind="nonAttack" data-id="' +
+          escapeHtml(a.id) +
+          '"' +
+          (tip ? ' title="' + tip + '"' : "") +
+          ">" +
+          escapeHtml(a.name) +
+          '<span class="ep">' +
+          clamp(Math.round(Number(a.energyPercent) || 8), 1, 100) +
+          "% pool" +
+          (a.buffTargets ? " · " + escapeHtml(a.buffTargets) : "") +
+          "</span></button>";
+      });
+      ho += "</div>";
+    }
+    otherEl.innerHTML = ho;
+
+    formsEl.querySelectorAll("button.btn-move:not([disabled])").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-id");
+        document.getElementById("sheetAbility").classList.remove("is-open");
+        submitPlayerAction({ type: "ability", abilityKind: "form", abilityId: id });
+      });
+    });
+    otherEl.querySelectorAll("button.btn-move:not([disabled])").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-id");
+        document.getElementById("sheetAbility").classList.remove("is-open");
+        submitPlayerAction({ type: "ability", abilityKind: "nonAttack", abilityId: id });
+      });
+    });
+  }
+
+  function renderBattleSheets() {
+    renderAttackGrid();
+    renderAbilityGrid();
+  }
+
+  function setActionLocked(locked) {
+    if (state) state._actionUiLocked = !!locked;
+    [
+      "btnAttack",
+      "btnAbility",
+      "btnRetreat",
+      "btnSupport",
+      "btnPlanDistract",
+      "btnPlanFeint",
+      "btnPlanClear",
+      "btnModeNormal",
+      "btnModeCharge",
+      "btnModeRage",
+      "btnModeDefensive",
+    ].forEach(function (id) {
+      var b = document.getElementById(id);
+      if (b) b.disabled = !!locked;
+    });
+    if (!locked && state && !state.over) updateStanceActionButtons();
+  }
+
+  function renderSupportGrid() {
+    if (!state) return;
+    var el = document.getElementById("supportFriendGrid");
+    var list = state.playerCompanionRoster || [];
+    var used = state.supportUsedIds || [];
+    if (!list.length) {
+      el.innerHTML =
+        '<div class="empty-row-note">No allies found. Start a <strong>new match</strong> (clear cache) so setup returns <code>playerCompanionRoster</code>, or check the fight error line below.</div>';
+      return;
+    }
+    var h = '<div class="move-row-label">Allies (one strike each per match)</div><div class="move-row-btns">';
+    list.forEach(function (c) {
+      var spent = used.indexOf(c.id) !== -1;
+      var loaded = !!findMaterializedCompanion(c.id);
+      h +=
+        '<button type="button" class="btn-move"' +
+        (spent ? " disabled" : "") +
+        ' data-support-id="' +
+        escapeHtml(c.id) +
+        '">' +
+        escapeHtml(c.name) +
+        '<span class="ep">' +
+        (spent ? "Used" : loaded ? "Ready" : "Load + call") +
+        "</span></button>";
+    });
+    h += "</div>";
+    el.innerHTML = h;
+    el.querySelectorAll("button.btn-move:not([disabled])").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-support-id");
+        materializeCompanionThenSupport(id);
+      });
+    });
+  }
+
+  function statusPillClass(s) {
+    var ty = String(s.type || "").toLowerCase();
+    var blob = ty + " " + String(s.label || "");
+    if (ty === "buff" || /shield|regen|barrier|haste|protect|ward|bless/i.test(blob)) return "pill buff";
+    if (ty === "dot" || /poison|burn|bleed|venom|corrod|tox/i.test(blob)) return "pill dot";
+    if (ty === "cc" || /stun|freeze|sleep|daze|paraly|root|bind|charm|fear/i.test(blob)) return "pill cc";
+    if (ty === "debuff") return "pill";
+    return "pill";
+  }
+
+  function renderStatuses(elId, list) {
+    var el = document.getElementById(elId);
+    el.innerHTML = "";
+    (list || []).forEach(function (s) {
+      var t = Number(s.turnsLeft);
+      if (!(t > 0)) return;
+      var div = document.createElement("span");
+      div.className = statusPillClass(s);
+      var parts = [s.label || s.type || "?"];
+      parts.push(t + "t");
+      var inten = Number(s.intensity);
+      if (isFinite(inten) && inten > 1) parts.push("×" + Math.round(inten));
+      div.textContent = parts.join(" · ");
+      el.appendChild(div);
+    });
+  }
+
+  function renderPassives(elId, stacks) {
+    var el = document.getElementById(elId);
+    if (!stacks || !stacks.length) {
+      el.innerHTML = "";
+      return;
+    }
+    var h = '<strong>Passives</strong> <span class="passives-hint">(always on)</span>';
+    stacks.forEach(function (s) {
+      var cap = s.maxStacks == null ? "∞" : String(s.maxStacks);
+      h +=
+        '<div class="passive-line">' +
+        escapeHtml(s.label || s.id) +
+        ": <b>" +
+        s.stacks +
+        "</b> / " +
+        cap +
+        "</div>";
+    });
+    el.innerHTML = h;
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function buildHudGradeStripHTML(side) {
+    if (!state) return "";
+    var f = side === "you" ? state.player : state.opponent;
+    if (!f) return "";
+    var energyCap = side === "you" ? state.playerEnergyMax : state.opponentEnergyMax;
+    var gradedRows = [
+      { label: "Dura", val: f.durabilityPoints },
+      { label: "Off", val: f.offensePoints },
+      { label: "Spd", val: f.speedPoints },
+      { label: "Sta", val: f.staminaPoints },
+      { label: "Heal", val: f.healingPoints || 0 },
+      { label: "En", val: energyCap },
+    ];
+    var sumFeat = 0;
+    var h = "";
+    gradedRows.forEach(function (row) {
+      var v = Number(row.val) || 0;
+      var featG = statGradeFromOpenPoints(v);
+      sumFeat += featG;
+      var grade = letterFromFeatGrade(featG);
+      var gClass = gradeToBadgeClass(grade);
+      h += '<div class="hud-grade-line">';
+      h += '<span class="hud-grade-name">' + escapeHtml(row.label) + "</span>";
+      h += '<span class="hud-grade-sep" aria-hidden="true">✦</span>';
+      h += '<span class="grade-badge ' + gClass + '">' + escapeHtml(grade) + "</span>";
+      h += "</div>";
+    });
+    var avgFeat = sumFeat / gradedRows.length;
+    var ovLetter = letterFromFeatGrade(avgFeat);
+    var ovClass = gradeToBadgeClass(ovLetter);
+    h += '<div class="hud-grade-line hud-grade-overall">';
+    h += '<span class="hud-grade-name">Overall</span>';
+    h += '<span class="hud-grade-sep" aria-hidden="true">✦</span>';
+    h += '<span class="grade-badge ' + ovClass + '">' + escapeHtml(ovLetter) + "</span>";
+    h += "</div>";
+    return h;
+  }
+
+  function renderHudGradeStrips() {
+    if (!state) return;
+    var y = document.getElementById("youHudGrades");
+    var o = document.getElementById("oppHudGrades");
+    if (y) y.innerHTML = buildHudGradeStripHTML("you");
+    if (o) o.innerHTML = buildHudGradeStripHTML("opp");
+  }
+
+  function renderBars() {
+    if (!state) return;
+    var pm = state.playerMaxHp;
+    var om = state.opponentMaxHp;
+    var pem = getEffectiveEnergyCap("you");
+    var oem = getEffectiveEnergyCap("opp");
+    document.getElementById("youHpBar").style.width = pm > 0 ? (state.playerHp / pm) * 100 + "%" : "0%";
+    document.getElementById("oppHpBar").style.width = om > 0 ? (state.opponentHp / om) * 100 + "%" : "0%";
+    document.getElementById("youHpText").textContent =
+      pctFill(state.playerHp, pm) + " · " + fmtNum(state.playerHp) + " / " + fmtNum(pm);
+    document.getElementById("oppHpText").textContent =
+      pctFill(state.opponentHp, om) + " · " + fmtNum(state.opponentHp) + " / " + fmtNum(om);
+    var youHpTip = fmtNum(state.playerHp) + " / " + fmtNum(pm) + " HP";
+    var oppHpTip = fmtNum(state.opponentHp) + " / " + fmtNum(om) + " HP";
+    var yOuter = document.getElementById("youHpBarOuter");
+    var oOuter = document.getElementById("oppHpBarOuter");
+    if (yOuter) {
+      yOuter.setAttribute("title", youHpTip);
+      yOuter.setAttribute("aria-label", "HP " + youHpTip);
+    }
+    if (oOuter) {
+      oOuter.setAttribute("title", oppHpTip);
+      oOuter.setAttribute("aria-label", "HP " + oppHpTip);
+    }
+    document.getElementById("youEnBar").style.width = pem > 0 ? (state.playerEnergy / pem) * 100 + "%" : "0%";
+    document.getElementById("oppEnBar").style.width = oem > 0 ? (state.opponentEnergy / oem) * 100 + "%" : "0%";
+    document.getElementById("youEnText").textContent =
+      pctFill(state.playerEnergy, pem) + " · " + fmtNum(state.playerEnergy) + " / " + fmtNum(pem);
+    document.getElementById("oppEnText").textContent =
+      pctFill(state.opponentEnergy, oem) + " · " + fmtNum(state.opponentEnergy) + " / " + fmtNum(oem);
+    document.getElementById("fatigueLine").textContent =
+      "F " + Math.round(state.fatiguePlayer) + " / " + Math.round(state.fatigueOpponent);
+    renderStatuses("youStatuses", state.playerStatuses);
+    renderStatuses("oppStatuses", state.opponentStatuses);
+    renderPassives("youPassives", state.playerPassiveStacks);
+    renderPassives("oppPassives", state.opponentPassiveStacks);
+    updateFormDisplay();
+    renderHudGradeStrips();
+    renderBattleSheets();
+    renderStanceAndPlanUI();
+  }
+
+  function renderStanceAndPlanUI() {
+    if (!state) return;
+    var mid = state.playerCombatMode || "normal";
+    document.querySelectorAll(".btn-mode").forEach(function (b) {
+      var m = b.getAttribute("data-mode");
+      b.classList.toggle("is-active", m === mid);
+    });
+    var plan = state.playerPlan || null;
+    var pd = document.getElementById("btnPlanDistract");
+    var pf = document.getElementById("btnPlanFeint");
+    if (pd) pd.classList.toggle("is-active", plan === "distract");
+    if (pf) pf.classList.toggle("is-active", plan === "feint");
+
+    var mode = getPlayerCombatModeSpec();
+    var stEl = document.getElementById("stanceMultHint");
+    if (stEl) {
+      var parts = ["Energy ×" + fmtStanceMult(mode.energyMult), "Damage ×" + fmtStanceMult(mode.attackMult)];
+      if (mode.durabilityMult !== 1) parts.push("Defense ×" + fmtStanceMult(mode.durabilityMult));
+      if (mode.blockHeavy) parts.push("No heavy");
+      if (mid === "charge") parts.push("+10% pool if strike connects");
+      if (mid === "rage" || mid === "charge") parts.push("No retreat");
+      stEl.textContent = parts.join(" · ");
+    }
+
+    var dPct = Math.round(predictDistractSuccessChance() * 100);
+    var fPct = Math.round(predictFeintSuccessChance() * 100);
+    var dEl = document.getElementById("planDistractChance");
+    var fEl = document.getElementById("planFeintChance");
+    if (dEl) dEl.textContent = "~" + dPct + "% success";
+    if (fEl) fEl.textContent = "~" + fPct + "% success";
+    updateStanceActionButtons();
+  }
+
+  function recordFightLine(kind, text) {
+    var t = String(text || "").trim();
+    if (!t) return;
+    fightFullLog.push({ kind: kind || "", text: t });
+  }
+
+  function setLatestBeatVisual(kind, text) {
+    var log = document.getElementById("log");
+    var t = String(text || "").trim();
+    if (!t) {
+      log.innerHTML = '<div class="beat-fill"><p class="beat-empty">—</p></div>';
+      return;
+    }
+    var label = kind ? '<span class="label">' + escapeHtml(kind) + "</span>" : "";
+    log.innerHTML =
+      '<div class="beat-fill"><p class="beat-line">' + label + (label ? " " : "") + escapeHtml(t) + "</p></div>";
+    log.classList.add("log-pulse");
+    clearTimeout(setLatestBeatVisual._pulseT);
+    setLatestBeatVisual._pulseT = setTimeout(function () {
+      log.classList.remove("log-pulse");
+    }, 520);
+  }
+
+  function formatFullFightText() {
+    return fightFullLog
+      .map(function (e, i) {
+        return (i + 1) + ". " + (e.kind ? "[" + e.kind + "] " : "") + e.text;
+      })
+      .join("\n\n");
+  }
+
+  function openFullFightOverlay() {
+    var el = document.getElementById("fullFightText");
+    el.textContent = fightFullLog.length ? formatFullFightText() : "No beats yet.";
+    document.getElementById("fullFightOverlay").classList.add("is-open");
+  }
+
+  function closeFullFightOverlay() {
+    document.getElementById("fullFightOverlay").classList.remove("is-open");
+  }
+
+  function normalizeMoveChart(raw) {
+    var out = { basic: [], ranged: [], heavy: [], quick: [] };
+    if (!raw || typeof raw !== "object") return out;
+    MOVE_CATS.forEach(function (c) {
+      if (!Array.isArray(raw[c])) return;
+      raw[c].forEach(function (m) {
+        if (!m || !m.name) return;
+        var only = null;
+        if (Array.isArray(m.onlyInFormIds) && m.onlyInFormIds.length) only = m.onlyInFormIds.map(String);
+        else if (m.onlyInFormId) only = [String(m.onlyInFormId)];
+        var tf = Number(m.techniqueFactor);
+        if (!isFinite(tf) || tf <= 0) {
+          var ap = Number(m.attackPower);
+          if (isFinite(ap) && ap > 0) tf = clamp(ap / 80, 0.08, 6);
+          else tf = 0.35;
+        }
+        out[c].push({
+          id: String(m.id || m.name).replace(/\s+/g, "_"),
+          name: String(m.name),
+          energyPercent: clamp(Math.max(1, Number(m.energyPercent) || 5), 1, 100),
+          techniqueFactor: clamp(tf, 0.05, 8),
+          onlyInFormIds: only,
+        });
+      });
+    });
+    MOVE_CATS.forEach(function (c) {
+      out[c] = out[c].slice(0, 10);
+    });
+    return out;
+  }
+
+  function normalizeAbilities(raw) {
+    var forms = [];
+    var nonAttack = [];
+    if (raw && typeof raw === "object") {
+      if (Array.isArray(raw.forms)) {
+        raw.forms.forEach(function (a) {
+          if (!a || !a.name) return;
+          var req = null;
+          if (Array.isArray(a.requiresFormIds) && a.requiresFormIds.length) req = a.requiresFormIds.map(String);
+          forms.push({
+            id: String(a.id || a.name).replace(/\s+/g, "_"),
+            name: String(a.name),
+            energyPercent: clamp(Math.max(1, Number(a.energyPercent) || 10), 1, 100),
+            attackMultiplier: clamp(Number(a.attackMultiplier) || 1, 0.5, 25),
+            description: String(a.description || ""),
+            requiresFormIds: req,
+            statModifiers: normalizeFormStatModifiers(a.statModifiers),
+          });
+        });
+      }
+      if (Array.isArray(raw.nonAttack)) {
+        raw.nonAttack.forEach(function (a) {
+          if (!a || !a.name) return;
+          var only = null;
+          if (Array.isArray(a.onlyInFormIds) && a.onlyInFormIds.length) only = a.onlyInFormIds.map(String);
+          else if (a.onlyInFormId) only = [String(a.onlyInFormId)];
+          var bt = a.buffTargets != null ? String(a.buffTargets).toLowerCase() : "";
+          if (bt !== "self" && bt !== "enemy" && bt !== "both") bt = "";
+          nonAttack.push({
+            id: String(a.id || a.name).replace(/\s+/g, "_"),
+            name: String(a.name),
+            energyPercent: clamp(Math.max(1, Number(a.energyPercent) || 8), 1, 100),
+            onlyInFormIds: only,
+            buffTargets: bt || null,
+            description: String(a.description || ""),
+            statusGrantSelf: Array.isArray(a.statusGrantSelf) ? a.statusGrantSelf : null,
+            statusGrantEnemy: Array.isArray(a.statusGrantEnemy) ? a.statusGrantEnemy : null,
+          });
+        });
+      }
+    }
+    return { forms: forms.slice(0, 10), nonAttack: nonAttack.slice(0, 10) };
+  }
+
+  function looseAllyName(obj) {
+    if (!obj || typeof obj !== "object") return "";
+    return String(
+      obj.name ||
+        obj.character ||
+        obj.displayName ||
+        obj.allyName ||
+        obj.fighterName ||
+        obj.label ||
+        ""
+    ).trim();
+  }
+
+  function parseJsonArrayMaybe(v) {
+    if (v == null) return null;
+    if (Array.isArray(v)) return v;
+    if (typeof v === "string") {
+      try {
+        var p = JSON.parse(v);
+        return Array.isArray(p) ? p : null;
+      } catch (e) {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  function pushUniqueRosterSlot(out, entry) {
+    if (!entry || typeof entry !== "object") return;
+    var name = looseAllyName(entry);
+    if (!name) return;
+    var idRaw = entry.id != null && String(entry.id).trim() !== "" ? String(entry.id) : name;
+    var base = idRaw.replace(/\s+/g, "_");
+    var id = base;
+    var n = 0;
+    while (true) {
+      var clash = false;
+      for (var i = 0; i < out.length; i++) {
+        if (out[i].id === id) {
+          clash = true;
+          break;
+        }
+      }
+      if (!clash) break;
+      n++;
+      id = base + "_" + n;
+    }
+    if (out.length >= 4) return;
+    out.push({
+      id: id,
+      name: name,
+      series: String(entry.series || entry.work || entry.franchise || entry.source || "").trim(),
+    });
+  }
+
+  function extractCompanionRosterFromSetup(d) {
+    if (!d || typeof d !== "object") return [];
+    var out = [];
+    var primarySources = [
+      parseJsonArrayMaybe(d.playerCompanionRoster),
+      parseJsonArrayMaybe(d.companionRoster),
+      parseJsonArrayMaybe(d.supportRoster),
+      parseJsonArrayMaybe(d.allies),
+    ];
+    if (d.player && typeof d.player === "object") {
+      primarySources.push(
+        parseJsonArrayMaybe(d.player.companions),
+        parseJsonArrayMaybe(d.player.allies),
+        parseJsonArrayMaybe(d.player.supportRoster)
+      );
+    }
+    var s, arr, i;
+    for (s = 0; s < primarySources.length; s++) {
+      arr = primarySources[s];
+      if (!arr) continue;
+      for (i = 0; i < arr.length; i++) {
+        pushUniqueRosterSlot(out, arr[i]);
+      }
+    }
+    if (out.length < 4) {
+      var fallbacks = [parseJsonArrayMaybe(d.playerCompanions), parseJsonArrayMaybe(d.companions)];
+      for (s = 0; s < fallbacks.length; s++) {
+        arr = fallbacks[s];
+        if (!arr) continue;
+        for (i = 0; i < arr.length; i++) {
+          pushUniqueRosterSlot(out, arr[i]);
+          if (out.length >= 4) break;
+        }
+        if (out.length >= 4) break;
+      }
+    }
+    return out.slice(0, 4);
+  }
+
+  function normalizeCompanionEntry(c) {
+    if (!c) return null;
+    var nm = looseAllyName(c);
+    if (!nm) return null;
+    var dp = Number(c.durabilityPoints);
+    if (!isFinite(dp) || dp <= 0) dp = 50;
+    var ab = normalizeAbilities(c.playerAbilities || c.abilities || { forms: [], nonAttack: [] });
+    return {
+      id: String(c.id || nm).replace(/\s+/g, "_"),
+      name: nm,
+      series: String(c.series || c.work || c.franchise || ""),
+      wikiTierLabel: c.wikiTierLabel != null ? String(c.wikiTierLabel) : "",
+      offensePoints: Number(c.offensePoints) || dp * 0.8,
+      durabilityPoints: dp,
+      speedPoints: Number(c.speedPoints) || 40,
+      staminaPoints: Number(c.staminaPoints) || 40,
+      healingPoints: Number(c.healingPoints) || 0,
+      energyPoolMax: Number(c.energyPoolMax) || 100,
+      moveChart: normalizeMoveChart(c.moveChart),
+      abilities: ab,
+    };
+  }
+
+  function deriveCompanionRosterFromSetup(d) {
+    return extractCompanionRosterFromSetup(d);
+  }
+
+  function deriveMaterializedCompanionsFromSetup(d) {
+    if (!Array.isArray(d.playerCompanions)) return [];
+    var out = [];
+    for (var i = 0; i < d.playerCompanions.length; i++) {
+      var c = d.playerCompanions[i];
+      if (!c || !looseAllyName(c)) continue;
+      var ent = normalizeCompanionEntry(c);
+      if (!ent) continue;
+      var n =
+        ent.moveChart.basic.length +
+        ent.moveChart.quick.length +
+        ent.moveChart.ranged.length +
+        ent.moveChart.heavy.length;
+      if (n > 0) out.push(ent);
+    }
+    return out;
+  }
+
+  function companionFromFighterCache(cached, rosterId, expectedAllyName) {
+    if (!cached || !cached.fighter || !cached.moveChart) return null;
+    var f = cached.fighter;
+    var exp = String(expectedAllyName || "").trim();
+    if (exp && f && f.name && fighterCacheKey(f.name) !== fighterCacheKey(exp)) {
+      return null;
+    }
+    var nm = (f && f.name) || expectedAllyName || "";
+    if (!String(nm).trim()) return null;
+    var ent = normalizeCompanionEntry({
+      id: rosterId,
+      name: nm,
+      series: (f && f.series) || "",
+      wikiTierLabel: (f && f.wikiTierLabel) || "",
+      offensePoints: f && f.offensePoints,
+      durabilityPoints: f && f.durabilityPoints,
+      speedPoints: f && f.speedPoints,
+      staminaPoints: f && f.staminaPoints,
+      healingPoints: f && f.healingPoints,
+      energyPoolMax: f && f.energyPoolMax,
+      moveChart: cached.moveChart,
+      playerAbilities: cached.abilities,
+    });
+    if (ent) ent.id = String(rosterId);
+    return ent;
+  }
+
+  function buildCompanionGeneratePayload(allyMeta, registry) {
+    return (
+      BACKEND_COMPANION_GENERATE +
+      "\n\n=== DATABASE REGISTRY ===\n" +
+      JSON.stringify(registry || []) +
+      "\n\n=== ALLY ===\n" +
+      JSON.stringify(allyMeta) +
+      "\n\n=== PLAYER SUMMARY ===\n" +
+      JSON.stringify({
+        name: state.player.name,
+        series: state.player.series,
+        offensePoints: state.player.offensePoints,
+        durabilityPoints: state.player.durabilityPoints,
+        wikiTierLabel: state.player.wikiTierLabel,
+      }) +
+      "\n\n=== OPPONENT SUMMARY ===\n" +
+      JSON.stringify({
+        name: state.opponent.name,
+        series: state.opponent.series,
+        offensePoints: state.opponent.offensePoints,
+        durabilityPoints: state.opponent.durabilityPoints,
+        wikiTierLabel: state.opponent.wikiTierLabel,
+      })
+    );
+  }
+
+  function findRosterEntry(companionId) {
+    var cid = String(companionId || "");
+    var r = state.playerCompanionRoster || [];
+    for (var i = 0; i < r.length; i++) {
+      if (String(r[i].id) === cid) return r[i];
+    }
+    return null;
+  }
+
+  function findMaterializedCompanion(companionId) {
+    var cid = String(companionId || "");
+    var list = state.playerCompanions || [];
+    for (var i = 0; i < list.length; i++) {
+      if (String(list[i].id) === cid) return list[i];
+    }
+    return null;
+  }
+
+  function showSupportGenerateOverlay(allyName) {
+    var ov = document.getElementById("supportGenOverlay");
+    var lab = document.getElementById("supportGenLabel");
+    if (lab) {
+      var n = String(allyName || "Ally").trim() || "Ally";
+      lab.textContent = "Preparing support: " + n + "…";
+    }
+    if (ov) ov.removeAttribute("hidden");
+  }
+
+  function hideSupportGenerateOverlay() {
+    var ov = document.getElementById("supportGenOverlay");
+    if (ov) ov.setAttribute("hidden", "");
+  }
+
+  function materializeCompanionThenSupport(companionId) {
+    if (!state || state.over) return Promise.resolve();
+    if (state._submitBusy || state._companionMaterializeBusy) return Promise.resolve();
+    var existing = findMaterializedCompanion(companionId);
+    if (existing) {
+      document.getElementById("sheetSupport").classList.remove("is-open");
+      return submitPlayerAction({ type: "support", companionId: companionId });
+    }
+    var ally = findRosterEntry(companionId);
+    if (!ally) {
+      setGameErr("Could not find that ally on the roster.");
+      return Promise.resolve();
+    }
+    setGameErr("");
+    state._companionMaterializeBusy = true;
+    setActionLocked(true);
+    document.getElementById("lockHint").textContent = "Loading ally moveset…";
+    showSupportGenerateOverlay(ally.name);
+    var slotKey = companionMovesetCacheKey(companionId, ally.name);
+    return redisGetKey(slotKey)
+      .then(function (raw) {
+        var parsed = parseFighterCache(raw);
+        if (parsed && parsed.companion === true) {
+          var ent0 = companionFromFighterCache(parsed, companionId, ally.name);
+          if (ent0) return ent0;
+        }
+        return redisGetKey(fighterCacheKey(ally.name)).then(function (rawLegacy) {
+          var p2 = parseFighterCache(rawLegacy);
+          if (p2 && p2.companion === true) {
+            var entL = companionFromFighterCache(p2, companionId, ally.name);
+            if (entL) return entL;
+          }
+          return null;
+        });
+      })
+      .then(function (cachedEnt) {
+        if (cachedEnt) return cachedEnt;
+        return readRegistry().then(function (reg) {
+          return apiPost(buildCompanionGeneratePayload(ally, reg)).then(function (resp) {
+            if (resp && resp.valid === false) {
+              throw new Error((resp && resp.retryMessage) || "Ally research failed.");
+            }
+            var comp = resp && resp.companion;
+            if (!comp || typeof comp !== "object") {
+              if (resp && resp.moveChart && looseAllyName(resp)) comp = resp;
+            }
+            if (!comp || typeof comp !== "object") {
+              throw new Error((resp && resp.retryMessage) || "Model returned no companion object.");
+            }
+            if (!looseAllyName(comp)) {
+              comp = Object.assign({ name: ally.name, series: ally.series || "" }, comp);
+            }
+            var ent2 = normalizeCompanionEntry(comp);
+            if (!ent2) throw new Error("Could not parse ally sheet (needs name + moveChart).");
+            return ent2;
+          });
+        });
+      })
+      .then(function (ent) {
+        ent.id = companionId;
+        state.playerCompanions = state.playerCompanions || [];
+        var replaced = false;
+        state.playerCompanions.forEach(function (x, i) {
+          if (x.id === companionId) {
+            state.playerCompanions[i] = ent;
+            replaced = true;
+          }
+        });
+        if (!replaced) state.playerCompanions.push(ent);
+        if (state._persistKeyYou && state._persistKeyOpp) persistFightersToRedis(state._persistKeyYou, state._persistKeyOpp);
+        hideSupportGenerateOverlay();
+        document.getElementById("sheetSupport").classList.remove("is-open");
+        return submitPlayerAction({ type: "support", companionId: companionId });
+      })
+      .catch(function (e) {
+        hideSupportGenerateOverlay();
+        setGameErr(e.message || String(e));
+        document.getElementById("lockHint").textContent = "Choose your move.";
+        setActionLocked(false);
+        renderSupportGrid();
+      })
+      .finally(function () {
+        if (state) state._companionMaterializeBusy = false;
+      });
+  }
+
+  function mergePlayerFromSetup(d) {
+    var dp = Number(d.player && d.player.durabilityPoints);
+    if (!isFinite(dp) || dp <= 0) {
+      var legacy = Number(d.player && d.player.durability);
+      dp = isFinite(legacy) && legacy > 0 ? legacy : 100;
+    }
+    var op = Number(d.opponent && d.opponent.durabilityPoints);
+    if (!isFinite(op) || op <= 0) {
+      var leg = Number(d.opponent && d.opponent.durability);
+      op = isFinite(leg) && leg > 0 ? leg : 100;
+    }
+    var pMax = maxHpFromDurability(dp);
+    var oMax = maxHpFromDurability(op);
+    var pem = Number(d.player && d.player.energyPoolMax);
+    if (!isFinite(pem) || pem <= 0) pem = Number(d.playerEnergy) || 100;
+    var oem = Number(d.opponent && d.opponent.energyPoolMax);
+    if (!isFinite(oem) || oem <= 0) oem = Number(d.opponentEnergy) || 100;
+    var pe = d.playerEnergy != null ? Number(d.playerEnergy) : pem;
+    var oe = d.opponentEnergy != null ? Number(d.opponentEnergy) : oem;
+    return {
+      player: Object.assign({}, d.player, {
+        durabilityPoints: dp,
+        wikiTierLabel: d.player.wikiTierLabel != null ? String(d.player.wikiTierLabel) : "",
+        wikiTierMacro: d.player.wikiTierMacro != null ? String(d.player.wikiTierMacro) : "",
+        haxTier: (function () {
+          var t = Number(d.player.haxTier);
+          return isFinite(t) ? clamp(t, 0, 10) : 0;
+        })(),
+        featConsistency: (function () {
+          var c = Number(d.player.featConsistency);
+          return isFinite(c) ? clamp(c, 0, 1) : 0;
+        })(),
+        intelligenceGrade:
+          d.player.intelligenceGrade != null && isFinite(Number(d.player.intelligenceGrade))
+            ? clamp(Number(d.player.intelligenceGrade), 0, 100)
+            : null,
+        specialGrade:
+          d.player.specialGrade != null && isFinite(Number(d.player.specialGrade))
+            ? clamp(Number(d.player.specialGrade), 0, 100)
+            : null,
+        threatTier: d.player.threatTier != null ? String(d.player.threatTier) : "",
+        threatRank: Number(d.player.threatRank) || 0,
+        threatLabel: d.player.threatLabel != null ? String(d.player.threatLabel) : "",
+        offensePoints: Number(d.player.offensePoints) || dp * 0.8,
+        speedPoints: Number(d.player.speedPoints) || Number(d.player.speed) || 50,
+        staminaPoints: Number(d.player.staminaPoints) || Number(d.player.stamina) || 50,
+        healingPoints: Number(d.player.healingPoints) || 0,
+        energyPoolMax: pem,
+        passives: (Array.isArray(d.player.passives) ? d.player.passives : []).slice(0, 4),
+      }),
+      opponent: Object.assign({}, d.opponent, {
+        durabilityPoints: op,
+        wikiTierLabel: d.opponent.wikiTierLabel != null ? String(d.opponent.wikiTierLabel) : "",
+        wikiTierMacro: d.opponent.wikiTierMacro != null ? String(d.opponent.wikiTierMacro) : "",
+        haxTier: (function () {
+          var t = Number(d.opponent.haxTier);
+          return isFinite(t) ? clamp(t, 0, 10) : 0;
+        })(),
+        featConsistency: (function () {
+          var c = Number(d.opponent.featConsistency);
+          return isFinite(c) ? clamp(c, 0, 1) : 0;
+        })(),
+        intelligenceGrade:
+          d.opponent.intelligenceGrade != null && isFinite(Number(d.opponent.intelligenceGrade))
+            ? clamp(Number(d.opponent.intelligenceGrade), 0, 100)
+            : null,
+        specialGrade:
+          d.opponent.specialGrade != null && isFinite(Number(d.opponent.specialGrade))
+            ? clamp(Number(d.opponent.specialGrade), 0, 100)
+            : null,
+        threatTier: d.opponent.threatTier != null ? String(d.opponent.threatTier) : "",
+        threatRank: Number(d.opponent.threatRank) || 0,
+        threatLabel: d.opponent.threatLabel != null ? String(d.opponent.threatLabel) : "",
+        offensePoints: Number(d.opponent.offensePoints) || op * 0.8,
+        speedPoints: Number(d.opponent.speedPoints) || Number(d.opponent.speed) || 50,
+        staminaPoints: Number(d.opponent.staminaPoints) || Number(d.opponent.stamina) || 50,
+        healingPoints: Number(d.opponent.healingPoints) || 0,
+        energyPoolMax: oem,
+        passives: (Array.isArray(d.opponent.passives) ? d.opponent.passives : []).slice(0, 4),
+      }),
+      playerMaxHp: pMax,
+      opponentMaxHp: oMax,
+      playerEnergyMax: pem,
+      opponentEnergyMax: oem,
+      playerHp: pMax,
+      opponentHp: oMax,
+      playerEnergy: clamp(pe, 0, pem),
+      opponentEnergy: clamp(oe, 0, oem),
+      fatiguePlayer: d.fatiguePlayer != null ? Number(d.fatiguePlayer) : 0,
+      fatigueOpponent: d.fatigueOpponent != null ? Number(d.fatigueOpponent) : 0,
+      playerPassiveStacks: normalizeStacks(d.playerPassiveStacks, d.player && d.player.passives, "p"),
+      opponentPassiveStacks: normalizeStacks(d.opponentPassiveStacks, d.opponent && d.opponent.passives, "o"),
+      playerStatuses: normalizeStatuses(d.playerStatuses),
+      opponentStatuses: normalizeStatuses(d.opponentStatuses),
+      playerLastMoveCategory: "none",
+      opponentLastMoveCategory: "none",
+      playerMoveChart: normalizeMoveChart(d.playerMoveChart),
+      opponentMoveChart: normalizeMoveChart(d.opponentMoveChart),
+      playerAbilities: normalizeAbilities(d.playerAbilities),
+      opponentAbilities: normalizeAbilities(d.opponentAbilities),
+      playerActiveFormId: d.playerActiveFormId != null && d.playerActiveFormId !== "" ? String(d.playerActiveFormId) : null,
+      opponentActiveFormId: d.opponentActiveFormId != null && d.opponentActiveFormId !== "" ? String(d.opponentActiveFormId) : null,
+      firstTurn: d.firstTurn === "opponent" ? "opponent" : "player",
+      playerCompanionRoster: deriveCompanionRosterFromSetup(d),
+      playerCompanions: deriveMaterializedCompanionsFromSetup(d),
+      supportUsedIds: [],
+      playerCombatMode: "normal",
+      opponentDistractResistance: 0,
+      playerRetreatFailStacks: 0,
+    };
+  }
+
+  function enterBattleFromSetup(d, firstVal, arena) {
+    clearNetPollTimers();
+    fightFullLog = [];
+    var m = mergePlayerFromSetup(d);
+    state = Object.assign(
+      {
+        turn: firstVal === "opponent" ? "opponent" : "player",
+        over: false,
+        playerAttackGate: null,
+        _pendingSupportCompanionId: null,
+        _persistKeyYou: null,
+        _persistKeyOpp: null,
+        _submitBusy: false,
+        _companionMaterializeBusy: false,
+        playerPlan: null,
+        _planLockedForSubmit: null,
+        _actionUiLocked: false,
+      },
+      m
+    );
+    _lastYouFormId = state.playerActiveFormId;
+    _lastOppFormId = state.opponentActiveFormId;
+    var yn = state.player.name || "You";
+    var on = state.opponent.name || "Opponent";
+    document.getElementById("youTitle").textContent = yn;
+    document.getElementById("youTitle").title = yn;
+    document.getElementById("oppTitle").textContent = on;
+    document.getElementById("oppTitle").title = on;
+    document.getElementById("log").innerHTML = "";
+    document.getElementById("winnerBanner").hidden = true;
+    document.getElementById("retryBox").hidden = true;
+    document.getElementById("actionPanel").style.display = "";
+    document.getElementById("newBtn").disabled = false;
+    renderBars();
+    renderGateHint();
+    document.body.classList.add("battle-active");
+    document.getElementById("setupScreen").style.display = "none";
+    document.getElementById("setupLoading").setAttribute("hidden", "");
+    document.getElementById("gameScreen").classList.add("is-on");
+    setActionLocked(false);
+    document.getElementById("lockHint").textContent = "Choose your move.";
+
+    var intro = String(arena || "").trim() || String(d.introNarrative || "").trim();
+    var introEl = document.getElementById("introOverlay");
+    var introText = document.getElementById("introText");
+    if (intro && introEl && introText) {
+      introText.textContent = intro;
+      introEl.hidden = false;
+      introEl.classList.remove("is-out");
+      recordFightLine("Arena", intro);
+      setLatestBeatVisual("Arena", intro);
+      setTimeout(function () {
+        introEl.classList.add("is-out");
+        setTimeout(function () {
+          introEl.hidden = true;
+        }, 500);
+      }, 2200);
+    } else if (introEl) {
+      introEl.hidden = true;
+      setLatestBeatVisual("", "Fight begins — pick your move.");
+    }
+    syncOnlineBattleFooterButtons();
+    var gs = document.getElementById("gameScreen");
+    if (gs) {
+      if (isOnlineBattle()) {
+        gs.classList.add("online-arena-min");
+        startOnlineBattleHeartbeat();
+      } else {
+        gs.classList.remove("online-arena-min");
+      }
+    }
+  }
+
+  function applyTurnResult(r, prev) {
+    var lockedPlan = state._planLockedForSubmit;
+    var pHpBefore = prev ? prev.playerHp : state.playerHp;
+    var oHpBefore = prev ? prev.opponentHp : state.opponentHp;
+
+    state.playerHp = clamp(Number(r.playerHp), 0, state.playerMaxHp);
+    state.opponentHp = clamp(Number(r.opponentHp), 0, state.opponentMaxHp);
+    state.fatiguePlayer = clamp(Number(r.fatiguePlayer), 0, 100);
+    state.fatigueOpponent = clamp(Number(r.fatigueOpponent), 0, 100);
+    if (Array.isArray(r.playerStatuses)) state.playerStatuses = normalizeStatuses(r.playerStatuses);
+    if (Array.isArray(r.opponentStatuses)) state.opponentStatuses = normalizeStatuses(r.opponentStatuses);
+    if (Array.isArray(r.playerPassiveStacks)) {
+      state.playerPassiveStacks = r.playerPassiveStacks.map(function (x) {
+        return {
+          id: String(x.id || ""),
+          label: String(x.label || ""),
+          stacks: Math.max(0, Math.round(Number(x.stacks) || 0)),
+          maxStacks: x.maxStacks == null ? null : Number(x.maxStacks),
+        };
+      });
+    }
+    if (Array.isArray(r.opponentPassiveStacks)) {
+      state.opponentPassiveStacks = r.opponentPassiveStacks.map(function (x) {
+        return {
+          id: String(x.id || ""),
+          label: String(x.label || ""),
+          stacks: Math.max(0, Math.round(Number(x.stacks) || 0)),
+          maxStacks: x.maxStacks == null ? null : Number(x.maxStacks),
+        };
+      });
+    }
+    if (r.playerLastMoveCategory) state.playerLastMoveCategory = r.playerLastMoveCategory;
+    if (r.opponentLastMoveCategory) state.opponentLastMoveCategory = r.opponentLastMoveCategory;
+    if (r.playerActiveFormId !== undefined) state.playerActiveFormId = r.playerActiveFormId ? String(r.playerActiveFormId) : null;
+    if (r.opponentActiveFormId !== undefined) state.opponentActiveFormId = r.opponentActiveFormId ? String(r.opponentActiveFormId) : null;
+    state.playerEnergy = clamp(Number(r.playerEnergy), 0, getEffectiveEnergyCap("you"));
+    state.opponentEnergy = clamp(Number(r.opponentEnergy), 0, getEffectiveEnergyCap("opp"));
+    if (r.valid) {
+      if (r.opponentDistractResistance != null && isFinite(Number(r.opponentDistractResistance))) {
+        state.opponentDistractResistance = clamp(Math.round(Number(r.opponentDistractResistance)), 0, 99);
+      }
+      if (r.playerRetreatFailStacks != null && isFinite(Number(r.playerRetreatFailStacks))) {
+        state.playerRetreatFailStacks = clamp(Math.round(Number(r.playerRetreatFailStacks)), 0, 8);
+      }
+    }
+    if (r.nextTurn === "player" || r.nextTurn === "opponent") state.turn = r.nextTurn;
+    if (r.playerAttackGate !== undefined) {
+      state.playerAttackGate = r.playerAttackGate == null ? null : normalizePlayerAttackGate(r.playerAttackGate);
+    }
+    renderBars();
+    renderGateHint();
+
+    if (state.playerHp < pHpBefore) {
+      var sy = document.getElementById("spriteYou");
+      if (sy) {
+        sy.classList.add("hit");
+        setTimeout(function () {
+          sy.classList.remove("hit");
+        }, 500);
+      }
+      var yb = document.getElementById("youHpBar");
+      if (yb) {
+        yb.classList.add("pulse-dmg");
+        setTimeout(function () {
+          yb.classList.remove("pulse-dmg");
+        }, 600);
+      }
+    }
+    if (state.opponentHp < oHpBefore) {
+      var so = document.getElementById("spriteOpp");
+      if (so) {
+        so.classList.add("hit");
+        setTimeout(function () {
+          so.classList.remove("hit");
+        }, 500);
+      }
+      var ob = document.getElementById("oppHpBar");
+      if (ob) {
+        ob.classList.add("pulse-dmg");
+        setTimeout(function () {
+          ob.classList.remove("pulse-dmg");
+        }, 600);
+      }
+    }
+
+    var retry = document.getElementById("retryBox");
+    if (!r.valid && r.retryMessage) {
+      retry.hidden = false;
+      retry.textContent = r.retryMessage;
+    } else {
+      retry.hidden = true;
+      retry.textContent = "";
+    }
+
+    if (!r.valid && state && state._pendingSupportCompanionId) {
+      state._pendingSupportCompanionId = null;
+    }
+    if (r.valid && state && state._pendingSupportCompanionId) {
+      state.supportUsedIds = state.supportUsedIds || [];
+      state.supportUsedIds.push(state._pendingSupportCompanionId);
+      state._pendingSupportCompanionId = null;
+    }
+
+    if (r.valid && r.narrative && String(r.narrative).trim()) {
+      var nar = String(r.narrative).trim();
+      recordFightLine("", nar);
+      setLatestBeatVisual("", nar);
+    }
+
+    if (r.battleOver) {
+      state.over = true;
+      if (_net.battlePollTimer != null) {
+        clearTimeout(_net.battlePollTimer);
+        _net.battlePollTimer = null;
+      }
+      var octDone = document.getElementById("onlineCommitTimer");
+      if (octDone) {
+        octDone.setAttribute("hidden", "");
+        octDone.textContent = "";
+      }
+      setActionLocked(true);
+      document.getElementById("newBtn").disabled = false;
+      var w = document.getElementById("winnerBanner");
+      w.hidden = false;
+      if (r.winner === "player") w.textContent = "You win.";
+      else if (r.winner === "opponent") w.textContent = state.opponent.name + " wins.";
+      else w.textContent = "Fight over.";
+      document.getElementById("lockHint").textContent = "";
+      renderGateHint();
+      if (r.valid && lockedPlan) state.playerPlan = null;
+      state._planLockedForSubmit = null;
+      renderStanceAndPlanUI();
+      syncOnlineBattleFooterButtons();
+      if (isOnlineBattle()) startOnlineRematchWatcher();
+      return;
+    }
+
+    document.getElementById("actionPanel").style.display = "";
+    var hint =
+      state.turn === "opponent"
+        ? "Tempo: opponent — higher speed strikes first this beat."
+        : "Tempo: you — higher speed strikes first this beat.";
+    document.getElementById("lockHint").textContent = hint;
+    if (r.valid && lockedPlan) state.playerPlan = null;
+    state._planLockedForSubmit = null;
+    renderStanceAndPlanUI();
+  }
+
+  function buildGameStateJson(extra) {
+    var o = {
+      player: state.player,
+      opponent: state.opponent,
+      playerHp: state.playerHp,
+      opponentHp: state.opponentHp,
+      playerMaxHp: state.playerMaxHp,
+      opponentMaxHp: state.opponentMaxHp,
+      playerEnergy: state.playerEnergy,
+      opponentEnergy: state.opponentEnergy,
+      playerEnergyMax: state.playerEnergyMax,
+      opponentEnergyMax: state.opponentEnergyMax,
+      fatiguePlayer: state.fatiguePlayer,
+      fatigueOpponent: state.fatigueOpponent,
+      playerStatuses: state.playerStatuses,
+      opponentStatuses: state.opponentStatuses,
+      playerPassiveStacks: state.playerPassiveStacks,
+      opponentPassiveStacks: state.opponentPassiveStacks,
+      playerLastMoveCategory: state.playerLastMoveCategory,
+      opponentLastMoveCategory: state.opponentLastMoveCategory,
+      turn: state.turn,
+      firstTurn: state.firstTurn,
+      playerMoveChart: state.playerMoveChart,
+      opponentMoveChart: state.opponentMoveChart,
+      playerAbilities: state.playerAbilities,
+      opponentAbilities: state.opponentAbilities,
+      playerActiveFormId: state.playerActiveFormId,
+      opponentActiveFormId: state.opponentActiveFormId,
+      resolveEffectiveStats: {
+        player: buildResolveEffectiveSnapshot("you"),
+        opponent: buildResolveEffectiveSnapshot("opp"),
+      },
+      playerAttackGate: state.playerAttackGate,
+      playerCompanionRoster: state.playerCompanionRoster || [],
+      playerCompanions: state.playerCompanions || [],
+      supportUsedIds: state.supportUsedIds || [],
+      playerCombatMode: state.playerCombatMode || "normal",
+      playerPlanArmed: state.playerPlan || null,
+      opponentDistractResistance: state.opponentDistractResistance || 0,
+      playerRetreatFailStacks: state.playerRetreatFailStacks || 0,
+      planContextSnapshot: buildPlanContextSnapshot(),
+    };
+    if (extra && typeof extra === "object") {
+      Object.keys(extra).forEach(function (k) {
+        o[k] = extra[k];
+      });
+    }
+    return o;
+  }
+
+  function buildOpponentPickPayload() {
+    return BACKEND_OPPONENT_PICK + "\n\n=== GAME STATE (JSON) ===\n" + JSON.stringify(buildGameStateJson({}));
+  }
+
+  function buildResolvePayload(playerAction, opponentAction) {
+    var enriched = enrichPlayerActionForResolve(playerAction);
+    var o = buildGameStateJson({ playerAction: enriched, opponentAction: opponentAction });
+    o.playerTacticsSummary = {
+      combatMode: enriched.playerCombatMode || "normal",
+      plan: enriched.plan != null ? enriched.plan : null,
+      feintRetreat: !!enriched.feintRetreat,
+      planContext: enriched.planContext || {},
+    };
+    return BACKEND_RESOLVE + "\n\n=== GAME STATE (JSON) ===\n" + JSON.stringify(o);
+  }
+
+  function validateStanceAgainstAction(action) {
+    if (!state || !action) return true;
+    if ((isRageStance() || isChargeStance()) && action.type === "retreat") {
+      setGameErr(
+        (isRageStance() ? "Rage" : "Charge") + " stance: you cannot retreat. Switch stance first."
+      );
+      return false;
+    }
+    if (isGuardStance() && action.type === "attack") {
+      var rpsWin =
+        action.attackGateResolution &&
+        String(action.attackGateResolution.outcome || "").toLowerCase() === "win";
+      if (!rpsWin) {
+        setGameErr("Guard stance: you cannot attack. Use Abilities, Support, or Retreat—or switch stance.");
+        return false;
+      }
+    }
+    setGameErr("");
+    return true;
+  }
+
+  function validatePlanAgainstAction(action) {
+    if (!state || !action) return true;
+    var plan = state.playerPlan;
+    if (!plan) return true;
+    var t = action.type;
+    if (plan === "distract") {
+      if (t !== "attack" && t !== "ability" && t !== "support") {
+        setGameErr("Distract pairs with Attack, Abilities, or Support only — or tap Clear plan.");
+        return false;
+      }
+      if (isGuardStance() && t === "attack") {
+        setGameErr("Guard stance: pair Distract with Abilities or Support, not Attack.");
+        return false;
+      }
+    }
+    if (plan === "feint") {
+      if (isRageStance() || isChargeStance()) {
+        setGameErr(
+          (isRageStance() ? "Rage" : "Charge") +
+            " stance: Feint needs Retreat, which is disabled. Clear plan or switch stance."
+        );
+        return false;
+      }
+      if (t !== "retreat") {
+        setGameErr("Feint pairs with Retreat only — or tap Clear plan.");
+        return false;
+      }
+    }
+    setGameErr("");
+    return true;
+  }
+
+  function preparePlayerActionForSubmit(raw) {
+    var a = Object.assign({}, raw);
+    if (state.playerPlan === "feint" && a.type === "retreat") a.feintRetreat = true;
+    return a;
+  }
+
+  function enrichPlayerActionForResolve(action) {
+    var pa = Object.assign({}, action);
+    pa.playerCombatMode = state.playerCombatMode || "normal";
+    pa.plan = state._planLockedForSubmit || null;
+    pa.planContext = buildPlanContextSnapshot();
+    return pa;
+  }
+
+  function submitPlayerAction(playerAction) {
+    if (!state || state.over) return Promise.resolve();
+    if (state._submitBusy) return Promise.resolve();
+    var action = preparePlayerActionForSubmit(playerAction);
+    if (!validateStanceAgainstAction(action)) return Promise.resolve();
+    if (!validatePlanAgainstAction(action)) return Promise.resolve();
+    state._submitBusy = true;
+    state._planLockedForSubmit = state.playerPlan || null;
+    setGameErr("");
+    document.getElementById("lockHint").textContent = "Committing…";
+    setActionLocked(true);
+    document.getElementById("sheetAttack").classList.remove("is-open");
+    document.getElementById("sheetAbility").classList.remove("is-open");
+    document.getElementById("sheetSupport").classList.remove("is-open");
+    closeAttackGateOverlay();
+    if (action && action.type === "support" && action.companionId) {
+      state._pendingSupportCompanionId = String(action.companionId);
+    } else {
+      state._pendingSupportCompanionId = null;
+    }
+    var oppOv = document.getElementById("oppThinking");
+    oppOv.removeAttribute("hidden");
+    document.getElementById("oppThinkingLabel").textContent = "Opponent picks…";
+
+    if (isOnlineBattle()) {
+      document.getElementById("oppThinkingLabel").textContent = "Waiting for opponent & resolve…";
+      var enriched = enrichPlayerActionForResolve(action);
+      var promptState = _net.role === "host" ? buildGameStateJson({}) : null;
+      return commitOnlineTurn(_net.role, enriched, promptState)
+        .then(function (pollData) {
+          oppOv.setAttribute("hidden", "");
+          var r = pollData && pollData.result;
+          if (!r || typeof r !== "object") {
+            setGameErr("Missing resolve result from room.");
+            setActionLocked(false);
+            if (state) state._pendingSupportCompanionId = null;
+            if (state) state._planLockedForSubmit = null;
+            return null;
+          }
+          if (_net.role === "guest") r = swapOnlineTurnResultForGuest(r);
+          var prev = { playerHp: state.playerHp, opponentHp: state.opponentHp };
+          if (typeof pollData.beatSeq === "number") _net.lastBeat = pollData.beatSeq;
+          document.getElementById("turnLoading").hidden = false;
+          document.getElementById("turnLoadingLabel").textContent = "Resolving…";
+          applyTurnResult(r, prev);
+          if (!r.valid) {
+            if (state) state._pendingSupportCompanionId = null;
+          }
+          return r;
+        })
+        .catch(function (e) {
+          oppOv.setAttribute("hidden", "");
+          setGameErr(e.message || String(e));
+          if (state) state._pendingSupportCompanionId = null;
+          if (state) state._planLockedForSubmit = null;
+        })
+        .then(function () {
+          document.getElementById("turnLoading").hidden = true;
+          oppOv.setAttribute("hidden", "");
+          if (state && !state.over) setActionLocked(false);
+        })
+        .finally(function () {
+          if (state) state._submitBusy = false;
+          if (state && !state.over) updateStanceActionButtons();
+        });
+    }
+
+    return apiPost(buildOpponentPickPayload())
+      .then(function (pick) {
+        oppOv.setAttribute("hidden", "");
+        if (!pick.valid) {
+          setGameErr(pick.retryMessage || "Could not validate opponent choice.");
+          setActionLocked(false);
+          if (state) state._pendingSupportCompanionId = null;
+          if (state) state._planLockedForSubmit = null;
+          return null;
+        }
+        var opp = pick.opponentAction;
+        if (!opp || !opp.type) {
+          setGameErr("Invalid opponent action.");
+          setActionLocked(false);
+          if (state) state._pendingSupportCompanionId = null;
+          if (state) state._planLockedForSubmit = null;
+          return null;
+        }
+        var prev = { playerHp: state.playerHp, opponentHp: state.opponentHp };
+        document.getElementById("turnLoading").hidden = false;
+        document.getElementById("turnLoadingLabel").textContent = "Resolving…";
+        return apiPost(buildResolvePayload(action, opp)).then(function (r) {
+          applyTurnResult(r, prev);
+          return r;
+        });
+      })
+      .catch(function (e) {
+        document.getElementById("oppThinking").setAttribute("hidden", "");
+        setGameErr(e.message || String(e));
+        if (state) state._pendingSupportCompanionId = null;
+        if (state) state._planLockedForSubmit = null;
+      })
+      .then(function () {
+        document.getElementById("turnLoading").hidden = true;
+        document.getElementById("oppThinking").setAttribute("hidden", "");
+        if (state && !state.over) setActionLocked(false);
+      })
+      .finally(function () {
+        if (state) state._submitBusy = false;
+        if (state && !state.over) updateStanceActionButtons();
+      });
+  }
+
+  document.getElementById("startBtn").addEventListener("click", function () {
+    if (isOnlinePlaySelected()) {
+      setSetupErr("Online mode: lock both characters, then use Begin battle.");
+      return;
+    }
+    var you = document.getElementById("you").value.trim();
+    var opp = document.getElementById("opp").value.trim();
+    var arena = document.getElementById("arena").value.trim();
+    var first = document.querySelector('input[name="first"]:checked');
+    var firstVal = first ? first.value : "player";
+    if (!you || !opp) {
+      setSetupErr("Enter both characters.");
+      return;
+    }
+    setSetupErr("");
+    document.getElementById("startBtn").disabled = true;
+    document.getElementById("setupScreen").style.display = "none";
+    document.getElementById("setupLoading").removeAttribute("hidden");
+
+    var kickoff = Promise.resolve();
+
+    kickoff
+      .then(function () {
+        var keyYou = fighterCacheKey(you);
+        var keyOpp = fighterCacheKey(opp);
+        return readRegistry().then(function (reg) {
+          var msg =
+            BACKEND_SETUP +
+            "\n\n=== DATABASE REGISTRY (stored movesets; each ally slot is cached by roster **id**, not just name—avoids clashing with main fighters) ===\n" +
+            JSON.stringify(reg) +
+            "\n\n=== USER INPUT ===\nPlayer: " +
+            you +
+            "\nOpponent: " +
+            opp +
+            "\nWho goes first (tempo / narrative): " +
+            firstVal +
+            (arena ? "\nArena intro (optional): " + arena : "");
+          return Promise.all([redisGetKey(keyYou), redisGetKey(keyOpp)]).then(function (results) {
+            var c1 = parseFighterCache(results[0]);
+            var c2 = parseFighterCache(results[1]);
+            if (c1 && c2) {
+              var dCached = buildMergedSetupFromCache(c1, c2, firstVal, arena, you, opp);
+              enterBattleFromSetup(dCached, firstVal, arena);
+              state._persistKeyYou = keyYou;
+              state._persistKeyOpp = keyOpp;
+              return null;
+            }
+            return apiPost(msg).then(function (d) {
+              return mergeApiSetupWithRedis(d, c1, c2, you, opp);
+            });
+          });
+        });
+      })
+      .then(function (d) {
+        if (!d) return;
+        var keyYou = fighterCacheKey(you);
+        var keyOpp = fighterCacheKey(opp);
+        function finish(dFinal) {
+          enterBattleFromSetup(dFinal, firstVal, arena);
+          state._persistKeyYou = keyYou;
+          state._persistKeyOpp = keyOpp;
+          persistFightersToRedis(keyYou, keyOpp);
+        }
+        finish(d);
+      })
+      .catch(function (e) {
+        setSetupErr(e.message || String(e));
+        document.getElementById("setupLoading").setAttribute("hidden", "");
+        document.getElementById("setupScreen").style.display = "";
+      })
+      .then(function () {
+        document.getElementById("startBtn").disabled = false;
+        document.getElementById("setupLoading").setAttribute("hidden", "");
+      });
+  });
+
+  document.getElementById("onlineBeginBtn").addEventListener("click", function () {
+    if (!isOnlinePlaySelected() || _net.role !== "host" || !onlineRoomBase()) return;
+    setSetupErr("");
+    document.getElementById("setupScreen").style.display = "none";
+    document.getElementById("setupLoading").removeAttribute("hidden");
+
+    var you;
+    var opp;
+    var firstVal = "player";
+    var arena = "";
+
+    pollRoomOnce()
+      .then(function (data) {
+        you = (data.hostFighter || "").trim();
+        opp = (data.guestFighter || "").trim();
+        if (data.guestFighter) _net.guestFighter = data.guestFighter;
+        if (!you || !opp) throw new Error("Both players must lock characters first.");
+        var keyYou = fighterCacheKey(you);
+        var keyOpp = fighterCacheKey(opp);
+        return readRegistry().then(function (reg) {
+          var msg =
+            BACKEND_SETUP +
+            "\n\n=== DATABASE REGISTRY (stored movesets; each ally slot is cached by roster **id**, not just name—avoids clashing with main fighters) ===\n" +
+            JSON.stringify(reg) +
+            "\n\n=== USER INPUT ===\nPlayer: " +
+            you +
+            "\nOpponent: " +
+            opp +
+            "\nWho goes first (tempo / narrative): " +
+            firstVal;
+          return Promise.all([redisGetKey(keyYou), redisGetKey(keyOpp)]).then(function (results) {
+            var c1 = parseFighterCache(results[0]);
+            var c2 = parseFighterCache(results[1]);
+            if (c1 && c2) {
+              var dCached = buildMergedSetupFromCache(c1, c2, firstVal, arena, you, opp);
+              return postOnlineSetup(dCached, firstVal, arena).then(function () {
+                enterBattleFromSetup(dCached, firstVal, arena);
+                state._persistKeyYou = keyYou;
+                state._persistKeyOpp = keyOpp;
+                persistFightersToRedis(keyYou, keyOpp);
+                return null;
+              });
+            }
+            return apiPost(msg).then(function (d) {
+              return mergeApiSetupWithRedis(d, c1, c2, you, opp);
+            });
+          });
+        });
+      })
+      .then(function (d) {
+        if (!d) return;
+        var keyYou = fighterCacheKey(you);
+        var keyOpp = fighterCacheKey(opp);
+        return postOnlineSetup(d, firstVal, arena).then(function () {
+          enterBattleFromSetup(d, firstVal, arena);
+          state._persistKeyYou = keyYou;
+          state._persistKeyOpp = keyOpp;
+          persistFightersToRedis(keyYou, keyOpp);
+        });
+      })
+      .catch(function (e) {
+        setSetupErr(e.message || String(e));
+        document.getElementById("setupScreen").style.display = "";
+      })
+      .finally(function () {
+        document.getElementById("setupLoading").setAttribute("hidden", "");
+        if (_net.role === "host" && isOnlinePlaySelected()) {
+          pollRoomOnce().then(updateHostLobbyFromPoll).catch(function () {});
+        }
+      });
+  });
+
+  document.querySelectorAll(".btn-mode").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      if (!state || state.over || state._submitBusy) return;
+      var m = btn.getAttribute("data-mode");
+      if (!m) return;
+      state.playerCombatMode = m;
+      if ((m === "rage" || m === "charge") && state.playerPlan === "feint") state.playerPlan = null;
+      renderStanceAndPlanUI();
+      renderBars();
+    });
+  });
+  document.getElementById("btnPlanDistract").addEventListener("click", function () {
+    if (!state || state.over || state._submitBusy) return;
+    state.playerPlan = state.playerPlan === "distract" ? null : "distract";
+    renderStanceAndPlanUI();
+    setGameErr("");
+  });
+  document.getElementById("btnPlanFeint").addEventListener("click", function () {
+    if (!state || state.over || state._submitBusy) return;
+    if (isRageStance() || isChargeStance()) {
+      setGameErr("Feint needs Retreat — not available in Rage or Charge.");
+      return;
+    }
+    state.playerPlan = state.playerPlan === "feint" ? null : "feint";
+    renderStanceAndPlanUI();
+    setGameErr("");
+  });
+  document.getElementById("btnPlanClear").addEventListener("click", function () {
+    if (!state || state.over || state._submitBusy) return;
+    state.playerPlan = null;
+    renderStanceAndPlanUI();
+    setGameErr("");
+  });
+
+  document.getElementById("btnAttack").addEventListener("click", function () {
+    if (!state || state.over) return;
+    if (state.playerAttackGate && state.playerAttackGate.kind === "rps_shoot") {
+      openAttackGateOverlay();
+      return;
+    }
+    if (isGuardStance()) {
+      setGameErr("Guard stance: no attacks. Use Abilities, Support, or Retreat—or switch stance.");
+      return;
+    }
+    document.getElementById("sheetAttack").classList.add("is-open");
+    renderAttackGrid();
+  });
+  document.getElementById("sheetAttackClose").addEventListener("click", function () {
+    document.getElementById("sheetAttack").classList.remove("is-open");
+  });
+  document.getElementById("sheetAttack").addEventListener("click", function (e) {
+    if (e.target === e.currentTarget) e.currentTarget.classList.remove("is-open");
+  });
+
+  document.getElementById("btnAbility").addEventListener("click", function () {
+    if (!state || state.over) return;
+    document.getElementById("sheetAbility").classList.add("is-open");
+    renderAbilityGrid();
+  });
+  document.getElementById("sheetAbilityClose").addEventListener("click", function () {
+    document.getElementById("sheetAbility").classList.remove("is-open");
+  });
+  document.getElementById("sheetAbility").addEventListener("click", function (e) {
+    if (e.target === e.currentTarget) e.currentTarget.classList.remove("is-open");
+  });
+
+  document.getElementById("btnSupport").addEventListener("click", function () {
+    if (!state || state.over) return;
+    document.getElementById("sheetSupport").classList.add("is-open");
+    renderSupportGrid();
+  });
+  document.getElementById("sheetSupportClose").addEventListener("click", function () {
+    document.getElementById("sheetSupport").classList.remove("is-open");
+  });
+  document.getElementById("sheetSupport").addEventListener("click", function (e) {
+    if (e.target === e.currentTarget) e.currentTarget.classList.remove("is-open");
+  });
+
+  document.getElementById("btnRetreat").addEventListener("click", function () {
+    if (!state || state.over) return;
+    if (isRageStance() || isChargeStance()) {
+      setGameErr(
+        (isRageStance() ? "Rage" : "Charge") + " stance: you cannot retreat. Switch stance first."
+      );
+      return;
+    }
+    submitPlayerAction({ type: "retreat" });
+  });
+
+  document.getElementById("attackGateClose").addEventListener("click", function () {
+    closeAttackGateOverlay();
+  });
+  document.getElementById("attackGateOverlay").addEventListener("click", function (e) {
+    if (e.target === e.currentTarget) closeAttackGateOverlay();
+  });
+  ["rpsRock", "rpsPaper", "rpsScissors"].forEach(function (rid) {
+    document.getElementById(rid).addEventListener("click", onRpsChoice);
+  });
+
+  document.getElementById("rematchBtn").addEventListener("click", function () {
+    if (!isOnlineBattle() || !state || !state.over) return;
+    var rb = document.getElementById("rematchBtn");
+    if (rb) {
+      rb.disabled = true;
+      rb.textContent = "…";
+    }
+    onlineFetch("api/room/" + encodeURIComponent(_net.code) + "/rematch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ secret: _net.secret }),
+    })
+      .then(function (data) {
+        if (data && data.setup && data.setup.d && data.rematchEpoch) {
+          applyOnlineRematchIfReady(data);
+          return;
+        }
+        if (rb) {
+          rb.disabled = false;
+          rb.textContent = "Waiting for opponent…";
+        }
+      })
+      .catch(function (e) {
+        setGameErr((e && e.message) || String(e));
+        if (rb) {
+          rb.disabled = false;
+          rb.textContent = "Rematch";
+        }
+      });
+  });
+
+  document.getElementById("newBtn").addEventListener("click", function () {
+    if (isOnlineBattle()) return;
+    resetNetSession();
+    state = null;
+    fightFullLog = [];
+    closeAttackGateOverlay();
+    hideSupportGenerateOverlay();
+    document.getElementById("sheetSupport").classList.remove("is-open");
+    document.getElementById("oppThinking").setAttribute("hidden", "");
+    document.getElementById("turnLoading").hidden = true;
+    closeFullFightOverlay();
+    document.body.classList.remove("battle-active");
+    document.getElementById("gameScreen").classList.remove("is-on");
+    document.getElementById("setupScreen").style.display = "block";
+    document.getElementById("winnerBanner").hidden = true;
+    setGameErr("");
+    closeStatsCompare();
+    syncOnlineSetupUI();
+    var ocb = document.getElementById("onlineCodeBlock");
+    if (ocb) ocb.hidden = true;
+    var olh = document.getElementById("onlineLobbyHint");
+    if (olh) {
+      olh.hidden = true;
+      olh.textContent = "";
+    }
+    resetGuestCharPanelUi();
+    resetHostOnlineCharUi();
+    setOnlineStatus("");
+  });
+
+  document.getElementById("onlineStartBtn").addEventListener("click", function () {
+    if (!isOnlinePlaySelected()) return;
+    if (!onlineRoomBase()) {
+      setOnlineStatus("Set ONLINE_ROOM_WORKER_URL in the script first.");
+      return;
+    }
+    setOnlineStatus("Creating room…");
+    onlineFetch("api/room/create", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+      .then(function (data) {
+        resetHostOnlineCharUi();
+        _net.role = "host";
+        _net.code = data.code;
+        _net.secret = data.hostSecret;
+        _net.lastBeat = -1;
+        var disp = document.getElementById("onlineCodeDisplay");
+        if (disp) disp.textContent = data.code;
+        var codeBlock = document.getElementById("onlineCodeBlock");
+        if (codeBlock) codeBlock.hidden = false;
+        setOnlineStatus("Room ready — tell Player 2 the code. Then enter your fighter in the form below and lock in.");
+        syncOnlineSetupUI();
+        startHostLobbyPoll();
+      })
+      .catch(function (e) {
+        setOnlineStatus((e && e.message) || String(e));
+      });
+  });
+
+  document.getElementById("onlineJoinBtn").addEventListener("click", function () {
+    if (!isOnlinePlaySelected()) return;
+    if (!onlineRoomBase()) {
+      setOnlineStatus("Set ONLINE_ROOM_WORKER_URL in the script first.");
+      return;
+    }
+    var raw = (document.getElementById("onlineCodeInput") && document.getElementById("onlineCodeInput").value) || "";
+    var digits = String(raw).replace(/\D/g, "");
+    var code = digits.length >= 5 ? digits.slice(-5) : digits.padStart(5, "0");
+    if (!/^\d{5}$/.test(code)) {
+      setOnlineStatus("Enter a 5-digit code.");
+      return;
+    }
+    setOnlineStatus("Joining…");
+    onlineFetch("api/room/join", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: code }),
+    })
+      .then(function (data) {
+        _net.role = "guest";
+        _net.code = data.code;
+        _net.secret = data.guestSecret;
+        _net.lastBeat = -1;
+        resetGuestCharPanelUi();
+        setOnlineStatus("Enter your fighter, then tap Lock in character.");
+        syncOnlineSetupUI();
+      })
+      .catch(function (e) {
+        setOnlineStatus((e && e.message) || String(e));
+      });
+  });
+
+  document.getElementById("guestFighterLockBtn").addEventListener("click", function () {
+    if (!isOnlinePlaySelected() || _net.role !== "guest") return;
+    var name = (document.getElementById("guestFighterInput") && document.getElementById("guestFighterInput").value) || "";
+    name = String(name).trim();
+    if (name.length < 2) {
+      setOnlineStatus("Enter at least 2 characters for your fighter.");
+      return;
+    }
+    var inp = document.getElementById("guestFighterInput");
+    var btn = document.getElementById("guestFighterLockBtn");
+    if (btn) btn.disabled = true;
+    postOnlineFighter(name)
+      .then(function () {
+        if (inp) inp.disabled = true;
+        setOnlineStatus("Character locked — waiting for host to build the match…");
+        startGuestWaitingForSetup();
+      })
+      .catch(function (e) {
+        if (btn) btn.disabled = false;
+        setOnlineStatus((e && e.message) || String(e));
+      });
+  });
+
+  var lastPlayMode = playModeValue();
+  document.querySelectorAll('input[name="playMode"]').forEach(function (radio) {
+    radio.addEventListener("change", function () {
+      if (document.getElementById("gameScreen").classList.contains("is-on")) {
+        document.querySelectorAll('input[name="playMode"]').forEach(function (r) {
+          r.checked = r.value === lastPlayMode;
+        });
+        return;
+      }
+      lastPlayMode = playModeValue();
+      resetNetSession();
+      var codeBlock = document.getElementById("onlineCodeBlock");
+      if (codeBlock) codeBlock.hidden = true;
+      var olh = document.getElementById("onlineLobbyHint");
+      if (olh) {
+        olh.hidden = true;
+        olh.textContent = "";
+      }
+      resetGuestCharPanelUi();
+      resetHostOnlineCharUi();
+      setOnlineStatus("");
+      syncOnlineSetupUI();
+    });
+  });
+
+  document.getElementById("hostFighterLockBtn").addEventListener("click", function () {
+    if (!isOnlinePlaySelected() || _net.role !== "host") return;
+    var name = (document.getElementById("you") && document.getElementById("you").value) || "";
+    name = String(name).trim();
+    if (name.length < 2) {
+      setSetupErr("Enter at least 2 characters for your fighter.");
+      return;
+    }
+    setSetupErr("");
+    var youInp = document.getElementById("you");
+    var hbtn = document.getElementById("hostFighterLockBtn");
+    if (hbtn) hbtn.disabled = true;
+    postOnlineFighter(name)
+      .then(function () {
+        if (youInp) youInp.disabled = true;
+        return pollRoomOnce().then(updateHostLobbyFromPoll);
+      })
+      .catch(function (e) {
+        if (hbtn) hbtn.disabled = false;
+        setSetupErr((e && e.message) || String(e));
+      });
+  });
+
+  syncOnlineSetupUI();
+  syncOnlineBattleFooterButtons();
+
+  document.getElementById("btnCompareYou").addEventListener("click", function () {
+    openStatsCompare();
+  });
+  document.getElementById("btnCompareOpp").addEventListener("click", function () {
+    openStatsCompare();
+  });
+  document.getElementById("statsCompareBack").addEventListener("click", function () {
+    closeStatsCompare();
+  });
+  document.getElementById("statsCompareOverlay").addEventListener("click", function (e) {
+    if (e.target === e.currentTarget) closeStatsCompare();
+  });
+
+  document.getElementById("btnFullFight").addEventListener("click", function () {
+    openFullFightOverlay();
+  });
+  document.getElementById("fullFightClose").addEventListener("click", function () {
+    closeFullFightOverlay();
+  });
+  document.getElementById("fullFightOverlay").addEventListener("click", function (e) {
+    if (e.target === e.currentTarget) closeFullFightOverlay();
+  });
+  document.getElementById("fullFightCopy").addEventListener("click", function () {
+    var t = fightFullLog.length ? formatFullFightText() : "";
+    if (!t) return;
+    var btn = document.getElementById("fullFightCopy");
+    function done() {
+      var old = btn.textContent;
+      btn.textContent = "Copied";
+      setTimeout(function () {
+        btn.textContent = old;
+      }, 2200);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t).then(done).catch(function () {});
+    }
+  });
+
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Escape") return;
+    if (!document.getElementById("statsCompareOverlay").hasAttribute("hidden")) {
+      closeStatsCompare();
+      return;
+    }
+    document.getElementById("sheetAttack").classList.remove("is-open");
+    document.getElementById("sheetAbility").classList.remove("is-open");
+    document.getElementById("sheetSupport").classList.remove("is-open");
+    closeAttackGateOverlay();
+    closeFullFightOverlay();
+  });
+})();
+
+</script>
   </head>
   <body>
 <div class="bg-grid" aria-hidden="true"></div>
