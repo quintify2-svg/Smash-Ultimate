@@ -5731,5 +5731,237 @@ body.battle-active .brand-kicker {
 
       <footer class="foot">Needs internet. Fiction game—verify canon yourself.</footer>
     </div>
+  <script>
+/**
+ * UI layer only — does not change fight logic (arena-app.js).
+ * Command palette, toasts, room-code copy, density & legibility prefs.
+ */
+(function () {
+  "use strict";
+
+  var TOAST_MS = 2800;
+
+  function toast(msg) {
+    var stack = document.getElementById("toastStack");
+    if (!stack || !msg) return;
+    var t = document.createElement("div");
+    t.className = "toast";
+    t.setAttribute("role", "status");
+    t.textContent = msg;
+    stack.appendChild(t);
+    requestAnimationFrame(function () {
+      t.classList.add("toast-in");
+    });
+    setTimeout(function () {
+      t.classList.remove("toast-in");
+      t.classList.add("toast-out");
+      setTimeout(function () {
+        t.remove();
+      }, 320);
+    }, TOAST_MS);
+  }
+
+  function loadPrefs() {
+    try {
+      var d = localStorage.getItem("arena-ui-density");
+      if (d === "compact" || d === "cozy") document.documentElement.setAttribute("data-density", d);
+      var leg = localStorage.getItem("arena-ui-legible");
+      if (leg === "1") document.documentElement.setAttribute("data-legible", "true");
+    } catch (e) {}
+  }
+
+  function saveDensity(v) {
+    try {
+      localStorage.setItem("arena-ui-density", v);
+    } catch (e) {}
+    document.documentElement.setAttribute("data-density", v);
+    toast(v === "compact" ? "Layout: compact" : "Layout: cozy");
+  }
+
+  function toggleLegible() {
+    var on = document.documentElement.getAttribute("data-legible") === "true";
+    var next = !on;
+    try {
+      localStorage.setItem("arena-ui-legible", next ? "1" : "0");
+    } catch (e) {}
+    document.documentElement.toggleAttribute("data-legible", next);
+    toast(next ? "High legibility on" : "High legibility off");
+  }
+
+  function clickId(id) {
+    var el = document.getElementById(id);
+    if (el && !el.disabled && !el.hasAttribute("hidden")) el.click();
+  }
+
+  function focusId(id) {
+    var el = document.getElementById(id);
+    if (el && typeof el.focus === "function") el.focus();
+  }
+
+  var COMMANDS = [
+    { k: "start", label: "Start battle", run: function () { clickId("startBtn"); } },
+    { k: "new", label: "New match", run: function () { clickId("newBtn"); } },
+    { k: "attack", label: "Open Attack moves", run: function () { clickId("btnAttack"); } },
+    { k: "ability", label: "Open Abilities", run: function () { clickId("btnAbility"); } },
+    { k: "support", label: "Open Support", run: function () { clickId("btnSupport"); } },
+    { k: "retreat", label: "Retreat", run: function () { clickId("btnRetreat"); } },
+    { k: "log", label: "Open full fight log", run: function () { clickId("btnFullFight"); } },
+    { k: "you", label: "Focus — You play as", run: function () { focusId("you"); } },
+    { k: "opp", label: "Focus — Opponent", run: function () { focusId("opp"); } },
+    { k: "compact", label: "Density: compact", run: function () { saveDensity("compact"); } },
+    { k: "cozy", label: "Density: cozy", run: function () { saveDensity("cozy"); } },
+    { k: "legible", label: "Toggle high legibility", run: function () { toggleLegible(); } },
+  ];
+
+  function openPalette() {
+    var p = document.getElementById("cmdPalette");
+    var inp = document.getElementById("cmdPaletteInput");
+    if (!p || !inp) return;
+    p.hidden = false;
+    inp.value = "";
+    renderPalette("");
+    inp.focus();
+  }
+
+  function closePalette() {
+    var p = document.getElementById("cmdPalette");
+    if (p) p.hidden = true;
+  }
+
+  function renderPalette(q) {
+    var list = document.getElementById("cmdPaletteList");
+    if (!list) return;
+    var qq = (q || "").toLowerCase().trim();
+    list.innerHTML = "";
+    var i = 0;
+    COMMANDS.forEach(function (c) {
+      if (qq && c.label.toLowerCase().indexOf(qq) === -1 && c.k.indexOf(qq) === -1) return;
+      var li = document.createElement("li");
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = "cmd-item";
+      b.textContent = c.label;
+      b.dataset.cmdIndex = String(i);
+      b.addEventListener("click", function () {
+        c.run();
+        closePalette();
+      });
+      li.appendChild(b);
+      list.appendChild(li);
+      i++;
+    });
+    if (!list.children.length) {
+      var empty = document.createElement("li");
+      empty.className = "cmd-empty";
+      empty.textContent = "No commands match.";
+      list.appendChild(empty);
+    }
+  }
+
+  function wirePalette() {
+    var p = document.getElementById("cmdPalette");
+    var inp = document.getElementById("cmdPaletteInput");
+    if (!inp) return;
+    inp.addEventListener("input", function () {
+      renderPalette(inp.value);
+    });
+    if (p) {
+      p.addEventListener("click", function (e) {
+        if (e.target === p) closePalette();
+      });
+    }
+  }
+
+  function wireGlobalKeys() {
+    document.addEventListener("keydown", function (e) {
+      var meta = e.metaKey || e.ctrlKey;
+      if (meta && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        var pal = document.getElementById("cmdPalette");
+        if (pal && !pal.hidden) closePalette();
+        else openPalette();
+        return;
+      }
+      if (e.key === "Escape") {
+        closePalette();
+      }
+    });
+  }
+
+  function wireRoomCodeCopy() {
+    var btn = document.getElementById("btnCopyRoomCode");
+    var disp = document.getElementById("onlineCodeDisplay");
+    if (!btn || !disp) return;
+    function sync() {
+      var t = (disp.textContent || "").trim();
+      btn.hidden = t.length < 2;
+    }
+    sync();
+    try {
+      var mo = new MutationObserver(sync);
+      mo.observe(disp, { childList: true, characterData: true, subtree: true });
+    } catch (e) {}
+    btn.addEventListener("click", function () {
+      var t = (disp.textContent || "").trim();
+      if (!t) return;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(t).then(function () {
+          toast("Room code copied");
+        });
+      }
+    });
+  }
+
+  function wireRail() {
+    var dc = document.getElementById("uiDensityCompact");
+    var dz = document.getElementById("uiDensityCozy");
+    var leg = document.getElementById("uiLegibleToggle");
+    if (dc) dc.addEventListener("click", function () { saveDensity("compact"); });
+    if (dz) dz.addEventListener("click", function () { saveDensity("cozy"); });
+    if (leg) leg.addEventListener("click", function () { toggleLegible(); });
+  }
+
+  function wireFab() {
+    var fab = document.getElementById("uiFabPalette");
+    if (fab) fab.addEventListener("click", openPalette);
+  }
+
+  function wireSkipLink() {
+    var a = document.querySelector(".skip-link");
+    if (!a) return;
+    function sync() {
+      if (document.body.classList.contains("battle-active")) {
+        a.setAttribute("href", "#gameScreen");
+        a.textContent = "Skip to battle";
+      } else {
+        a.setAttribute("href", "#main");
+        a.textContent = "Skip to setup";
+      }
+    }
+    sync();
+    try {
+      var mo = new MutationObserver(sync);
+      mo.observe(document.body, { attributes: true, attributeFilter: ["class"] });
+    } catch (e) {}
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+
+  function init() {
+    loadPrefs();
+    wirePalette();
+    wireGlobalKeys();
+    wireRoomCodeCopy();
+    wireRail();
+    wireFab();
+    wireSkipLink();
+  }
+})();
+
+</script>
   </body>
 </html>
