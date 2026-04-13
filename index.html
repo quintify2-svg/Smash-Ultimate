@@ -1,0 +1,1735 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#121a24" />
+    <title>ARENA — Ember</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700;1,9..40,400&family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,700;0,9..144,800;1,9..144,400&display=swap" rel="stylesheet" />
+    <style>
+/* ARENA Ember — inlined (was assets/theme-b.css) */
+:root {
+  --page: #0e141c;
+  --elev: #141c26;
+  --panel: #1a2430;
+  --line: rgba(200, 232, 255, 0.14);
+  --text: #eef6fc;
+  --muted: #93abc0;
+  --accent: #e8a05c;
+  --accent2: #f0c674;
+  --warn: #d4e8fb;
+  --bad: #e8887a;
+  --you: #7cc9b8;
+  --opp: #f0a878;
+  --r: 10px;
+  --r-lg: 18px;
+  --font: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Fraunces", Georgia, serif;
+  --shadow: 0 20px 50px rgba(0, 0, 0, 0.55);
+}
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+[hidden] {
+  display: none !important;
+}
+html {
+  color-scheme: dark;
+}
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: var(--font);
+  font-size: 1rem;
+  background: var(--page);
+  color: var(--text);
+  line-height: 1.5;
+}
+.bg-grid {
+  position: fixed;
+  inset: 0;
+  background-image: radial-gradient(ellipse 80% 50% at 50% 0%, rgba(140, 200, 255, 0.07), transparent 55%),
+    linear-gradient(rgba(180, 220, 255, 0.045) 1px, transparent 1px), linear-gradient(90deg, rgba(180, 220, 255, 0.045) 1px, transparent 1px);
+  background-size: 100% 100%, 36px 36px, 36px 36px;
+  pointer-events: none;
+  z-index: 0;
+}
+.wrap {
+  position: relative;
+  z-index: 1;
+  max-width: 52rem;
+  margin: 0 auto;
+  padding: 1.25rem 0.85rem 2rem;
+}
+.site-header {
+  margin-bottom: 1.1rem;
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid var(--line);
+}
+.brand-kicker {
+  margin: 0 0 0.35rem;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.brand-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(2rem, 6vw, 2.75rem);
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+.tag {
+  margin: 0.55rem 0 0;
+  font-size: 0.92rem;
+  color: var(--muted);
+}
+.panel {
+  background: linear-gradient(165deg, color-mix(in srgb, var(--panel) 96%, #fff) 0%, var(--panel) 100%);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 1.05rem 1.1rem 1.15rem;
+  box-shadow: var(--shadow);
+}
+.field {
+  margin-bottom: 0.85rem;
+}
+label,
+.mode-inline-label {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 0.3rem;
+}
+input[type="text"],
+textarea {
+  width: 100%;
+  padding: 0.65rem 0.75rem;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--text);
+  font: inherit;
+}
+textarea {
+  min-height: 5rem;
+  resize: vertical;
+}
+.radio-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem 1rem;
+  font-size: 0.88rem;
+}
+.radio-row label {
+  display: inline;
+  margin: 0;
+  font-weight: 500;
+  cursor: pointer;
+  color: var(--text);
+}
+.btn {
+  font: inherit;
+  font-weight: 700;
+  padding: 0.65rem 1.1rem;
+  border-radius: var(--r);
+  border: 1px solid transparent;
+  background: linear-gradient(175deg, var(--accent), color-mix(in srgb, var(--accent) 65%, #0c141c));
+  color: #0f1822;
+  cursor: pointer;
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.btn-ghost {
+  background: transparent;
+  color: var(--text);
+  border-color: var(--line);
+}
+.btn-ghost:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.error {
+  margin-top: 0.65rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: var(--r);
+  background: color-mix(in srgb, var(--bad) 12%, var(--elev));
+  border: 1px solid color-mix(in srgb, var(--bad) 35%, transparent);
+  color: color-mix(in srgb, var(--bad) 15%, #fff);
+  font-size: 0.86rem;
+}
+.online-panel {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px dashed var(--line);
+}
+.online-flow-title {
+  margin: 0 0 0.35rem;
+  font-family: var(--font-display);
+  font-size: 1.08rem;
+}
+.online-flow-sub {
+  margin: 0 0 1rem;
+  font-size: 0.84rem;
+  color: var(--muted);
+}
+.online-paths-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+@media (max-width: 720px) {
+  .online-paths-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.online-path-card {
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 0.75rem 0.85rem;
+  background: var(--elev);
+}
+.online-path-badge {
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 0.45rem;
+}
+.online-steps {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.online-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.65rem;
+}
+.online-code-block {
+  margin-top: 0.65rem;
+  padding: 0.65rem;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.25);
+}
+.online-code-label {
+  display: block;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.online-code-digits {
+  margin: 0.25rem 0;
+  font-family: ui-monospace, monospace;
+  font-size: 1.35rem;
+  letter-spacing: 0.2em;
+  color: var(--accent2);
+}
+.online-code-hint {
+  font-size: 0.72rem;
+  color: var(--muted);
+  display: block;
+  margin-top: 0.35rem;
+}
+.online-code-input {
+  flex: 1 1 8rem;
+  min-width: 0;
+}
+.online-status,
+.online-lobby-hint,
+.online-form-cue {
+  font-size: 0.82rem;
+  margin: 0.5rem 0 0;
+  color: var(--muted);
+}
+.online-begin-wrap {
+  margin: 0.75rem 0;
+  padding: 0.75rem;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.2);
+}
+.online-begin-hint {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.setup-loading-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(10px);
+}
+.setup-loading-card {
+  text-align: center;
+  padding: 1.5rem 1.75rem;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  max-width: 22rem;
+}
+.setup-loading-title {
+  margin: 0.75rem 0 0.2rem;
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+}
+.setup-loading-sub {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid rgba(255, 255, 255, 0.1);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.55s linear infinite;
+}
+.spinner-lg {
+  width: 40px;
+  height: 40px;
+  border-width: 3px;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.loading {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+.loading[hidden] {
+  display: none !important;
+}
+#gameScreen.battle-full {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: none;
+  flex-direction: column;
+  background: radial-gradient(ellipse 100% 70% at 50% 0%, #2a2218 0%, var(--page) 50%);
+  overflow: hidden;
+}
+#gameScreen.battle-full.is-on {
+  display: flex;
+}
+body.battle-active .foot {
+  display: none;
+}
+body.battle-active .wrap {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+}
+body.battle-active .site-header,
+body.battle-active .brand-kicker {
+  display: none;
+}
+.battle-ambient {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.4;
+  background: radial-gradient(circle at 20% 30%, rgba(120, 190, 255, 0.11), transparent 45%),
+    radial-gradient(circle at 80% 70%, rgba(160, 210, 255, 0.07), transparent 50%);
+}
+.intro-overlay,
+.opp-thinking,
+.support-gen-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.25rem;
+  background: rgba(0, 0, 0, 0.88);
+  backdrop-filter: blur(8px);
+}
+.intro-overlay.is-out {
+  animation: introOut 0.4s ease forwards;
+  pointer-events: none;
+}
+@keyframes introOut {
+  to {
+    opacity: 0;
+    visibility: hidden;
+  }
+}
+.intro-card,
+.loading-card {
+  max-width: 26rem;
+  padding: 1.25rem 1.35rem;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+.intro-card h3 {
+  margin: 0 0 0.5rem;
+  font-family: var(--font-display);
+  font-size: 0.75rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.support-gen-hint {
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin: 0.65rem 0 0;
+  line-height: 1.45;
+}
+.winner {
+  position: relative;
+  z-index: 5;
+  flex-shrink: 0;
+  margin: 0.5rem 0.75rem 0;
+  padding: 0.75rem 1rem;
+  text-align: center;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1rem;
+  border-radius: var(--r);
+  border: 1px solid color-mix(in srgb, var(--accent2) 40%, var(--line));
+  background: linear-gradient(90deg, rgba(170, 220, 255, 0.16), rgba(130, 185, 255, 0.1));
+}
+.battle-layout {
+  position: relative;
+  z-index: 2;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(11.5rem, 24vw) minmax(0, 1fr) minmax(11.5rem, 24vw);
+  gap: 0.65rem 0.85rem;
+  align-items: start;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0.45rem max(0.35rem, env(safe-area-inset-right)) 0.35rem max(0.35rem, env(safe-area-inset-left));
+  box-sizing: border-box;
+}
+.battle-rail {
+  position: sticky;
+  top: 0.35rem;
+  z-index: 3;
+  align-self: start;
+  max-height: calc(100dvh - 13rem);
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.battle-rail--you,
+.battle-rail--opp {
+  width: 100%;
+  justify-self: stretch;
+}
+.battle-rail-card {
+  position: relative;
+}
+.battle-center-col {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-height: calc(100dvh - 11rem);
+}
+.battle-hud-mid {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+}
+.battle-hud-mid--top {
+  flex-shrink: 0;
+  padding: 0.35rem 0.5rem;
+  margin-bottom: 0.25rem;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: rgba(18, 26, 36, 0.88);
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem 0.85rem;
+}
+.battle-vs {
+  font-family: var(--font-display);
+  font-size: 0.95rem;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  color: var(--accent2);
+}
+.battle-fatigue-label {
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  text-align: center;
+  max-width: 6.5rem;
+}
+.stat-compact {
+  position: relative;
+  min-width: 0;
+  padding: 0.5rem 0.55rem;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: rgba(18, 26, 36, 0.96);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+}
+.stat-compact.you {
+  border-color: color-mix(in srgb, var(--you) 35%, var(--line));
+}
+.stat-compact.opp {
+  border-color: color-mix(in srgb, var(--opp) 35%, var(--line));
+  text-align: right;
+}
+.stat-compact h2 {
+  margin: 0 0 0.25rem;
+  font-family: var(--font-display);
+  font-size: clamp(0.78rem, 2.2vw, 0.95rem);
+  line-height: 1.2;
+  word-break: break-word;
+}
+.sprite-pill.battle-sprite-off {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  clip: rect(0, 0, 0, 0);
+  overflow: hidden;
+  border: 0 !important;
+  padding: 0 !important;
+  margin: -1px !important;
+}
+.form-badge {
+  font-size: 0.62rem;
+  color: var(--accent2);
+  min-height: 1em;
+}
+.form-badge.form-shift {
+  animation: badgePulse 0.65s ease;
+}
+@keyframes badgePulse {
+  40% {
+    color: var(--accent);
+  }
+}
+.bar-label {
+  font-size: 0.58rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-top: 0.35rem;
+}
+.bar-outer {
+  height: 22px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid var(--line);
+  overflow: hidden;
+  margin-top: 0.12rem;
+}
+.bar-hp-wrap {
+  cursor: help;
+}
+.bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  transition: width 0.45s cubic-bezier(0.4, 0, 0.2, 1);
+  max-width: 100%;
+}
+.bar-fill.you {
+  background: linear-gradient(90deg, #0d5c4a, var(--you));
+}
+.bar-fill.opp {
+  background: linear-gradient(90deg, #8b4518, var(--opp));
+}
+.bar-fill.energy-you {
+  background: linear-gradient(90deg, #5c4d2a, var(--accent2));
+}
+.bar-fill.energy-opp {
+  background: linear-gradient(90deg, #7a3e1a, color-mix(in srgb, var(--opp) 80%, #fff));
+}
+.bar-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-top: 0.12rem;
+}
+.status-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.4rem;
+  min-height: 1rem;
+}
+.pill {
+  font-size: 0.72rem;
+  padding: 0.15rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--bad) 40%, transparent);
+  background: color-mix(in srgb, var(--bad) 12%, transparent);
+  color: #fecaca;
+}
+.pill.buff {
+  border-color: rgba(52, 211, 153, 0.4);
+  background: rgba(52, 211, 153, 0.1);
+  color: #a7f3d0;
+}
+.passives-block {
+  margin-top: 0.35rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.passive-line {
+  margin-top: 0.2rem;
+}
+.btn-mini-stat {
+  margin-top: 0.45rem;
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0.28rem 0.45rem;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  cursor: pointer;
+  width: 100%;
+}
+.btn-mini-stat:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.hud-grade-strip {
+  margin-top: 0.35rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
+  font-size: 0.58rem;
+  line-height: 1.35;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.hud-grade-line {
+  display: flex;
+  align-items: center;
+  gap: 0.28rem;
+  flex-wrap: wrap;
+}
+.stat-compact.you .hud-grade-line {
+  justify-content: flex-start;
+}
+.stat-compact.opp .hud-grade-line {
+  justify-content: flex-end;
+}
+.hud-grade-name {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.hud-grade-sep {
+  font-size: 0.62rem;
+  line-height: 1;
+  color: var(--accent2);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--accent2) 55%, transparent);
+  opacity: 0.95;
+  flex-shrink: 0;
+}
+.hud-grade-overall {
+  margin-top: 0.15rem;
+  padding-top: 0.28rem;
+  border-top: 1px dashed color-mix(in srgb, var(--accent) 35%, var(--line));
+}
+.hud-grade-overall .hud-grade-name {
+  color: var(--accent2);
+}
+.grade-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.35em;
+  padding: 0.1rem 0.32rem;
+  border-radius: 0.25rem;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 0.68rem;
+  letter-spacing: 0.02em;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  line-height: 1;
+}
+.hud-grade-strip .grade-badge {
+  font-size: 0.62rem;
+  padding: 0.08rem 0.28rem;
+}
+.grade-badge.grade-splus {
+  background: linear-gradient(135deg, #fde68a, #f59e0b);
+  color: #0f1822;
+  border-color: color-mix(in srgb, #f59e0b 60%, var(--line));
+}
+.grade-badge.grade-s {
+  background: linear-gradient(135deg, #fef3c7, #d97706);
+  color: #0f1822;
+  border-color: color-mix(in srgb, #d97706 55%, var(--line));
+}
+.grade-badge.grade-a {
+  background: linear-gradient(135deg, #bbf7d0, #16a34a);
+  color: #052e16;
+  border-color: color-mix(in srgb, #16a34a 45%, var(--line));
+}
+.grade-badge.grade-b {
+  background: linear-gradient(135deg, #bae6fd, #0284c7);
+  color: #082f49;
+  border-color: color-mix(in srgb, #0284c7 45%, var(--line));
+}
+.grade-badge.grade-c {
+  background: linear-gradient(135deg, #e9d5ff, #7c3aed);
+  color: #1e1033;
+  border-color: color-mix(in srgb, #7c3aed 40%, var(--line));
+}
+.grade-badge.grade-d {
+  background: linear-gradient(135deg, #fecaca, #dc2626);
+  color: #450a0a;
+  border-color: color-mix(in srgb, #dc2626 40%, var(--line));
+}
+.grade-badge.grade-f {
+  background: linear-gradient(135deg, #d4d4d8, #52525b);
+  color: #18181b;
+  border-color: color-mix(in srgb, #52525b 50%, var(--line));
+}
+.grade-badge.grade-na {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--muted);
+  border-color: var(--line);
+}
+.sprite-pill.hit {
+  animation: hitShake 0.45s ease;
+}
+@keyframes hitShake {
+  20% {
+    transform: translateX(-4px);
+  }
+  50% {
+    transform: translateX(4px);
+  }
+}
+.bar-fill.pulse-dmg {
+  animation: barFlash 0.55s ease;
+}
+@keyframes barFlash {
+  50% {
+    filter: brightness(1.35);
+  }
+}
+.battle-feed {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-top: 0;
+}
+.battle-feed-top {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.25rem;
+}
+.btn-log-full {
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  border: none;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.battle-log-wrap {
+  flex: 1 1 auto;
+  min-height: min(44vh, 480px);
+  display: flex;
+  flex-direction: column;
+}
+#log.log.battle-log {
+  flex: 1 1 auto;
+  min-height: min(40vh, 420px);
+  display: flex;
+  flex-direction: column;
+  padding: 0.85rem 0.95rem;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.35);
+  overflow: auto;
+}
+.log.battle-log .beat-fill {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  min-height: min(36vh, 380px);
+}
+.log.battle-log .beat-line {
+  margin: 0;
+  line-height: 1.55;
+  font-size: clamp(0.82rem, 1.5vh + 0.4rem, 1.08rem);
+  font-weight: 600;
+}
+.log.battle-log .beat-line .label {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.log.battle-log .beat-empty {
+  margin: 0;
+  color: var(--muted);
+  font-style: italic;
+}
+#log.log-pulse {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.retry {
+  margin-top: 0.5rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: var(--r);
+  border-left: 3px solid var(--bad);
+  background: color-mix(in srgb, var(--bad) 10%, var(--elev));
+  font-size: 0.86rem;
+}
+.battle-bottom {
+  flex-shrink: 0;
+  margin-top: auto;
+  padding: 0.55rem max(0.65rem, env(safe-area-inset-right)) calc(0.55rem + env(safe-area-inset-bottom))
+    max(0.65rem, env(safe-area-inset-left));
+  border-top: 1px solid color-mix(in srgb, var(--line) 85%, var(--accent));
+  background: rgba(10, 16, 26, 0.82);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.4);
+}
+#actionPanel.action-bar-full {
+  display: grid;
+  grid-template-columns: minmax(72px, 5.5rem) minmax(0, 1fr) minmax(8rem, 10.5rem);
+  gap: 0.5rem 0.75rem;
+  align-items: stretch;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  backdrop-filter: none;
+  box-shadow: none;
+}
+.action-bar-plans {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  justify-content: center;
+}
+.plan-btn-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  align-items: center;
+}
+.btn-plan {
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 0.32rem 0.4rem;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: rgba(147, 197, 253, 0.12);
+  color: var(--warn);
+  cursor: pointer;
+  width: 100%;
+}
+.btn-plan.is-active {
+  border-color: var(--warn);
+  background: rgba(251, 191, 36, 0.2);
+}
+.plan-chance {
+  font-size: 0.62rem;
+  color: var(--muted);
+  text-align: center;
+}
+.btn-plan-clear {
+  font: inherit;
+  font-size: 0.65rem;
+  border: none;
+  background: none;
+  color: var(--muted);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.action-bar-center {
+  display: flex;
+  justify-content: stretch;
+  align-items: stretch;
+  min-width: 0;
+}
+.action-bar-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.45rem;
+  width: 100%;
+  max-width: none;
+}
+.action-bar-modes {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  min-width: 0;
+}
+.mode-label {
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  text-align: center;
+  margin-bottom: 0.35rem;
+  width: 100%;
+}
+.mode-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  grid-template-rows: repeat(2, 1fr);
+  gap: 0.42rem;
+  width: min(100%, 9.75rem);
+  aspect-ratio: 1;
+  box-sizing: border-box;
+}
+.btn-mode {
+  font: inherit;
+  font-size: 0.64rem;
+  font-weight: 700;
+  line-height: 1.12;
+  padding: 0.12rem 0.1rem;
+  margin: 0;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  border: 1px solid var(--line);
+  background: rgba(200, 230, 255, 0.045);
+  color: var(--muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  hyphens: none;
+  word-break: normal;
+}
+.btn-mode.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.stance-hint {
+  margin: 0.4rem 0 0;
+  font-size: 0.6rem;
+  color: var(--muted);
+  text-align: center;
+  max-width: 10.5rem;
+  line-height: 1.3;
+}
+.action-bar-extras {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  justify-content: center;
+  align-items: center;
+  margin-top: 0.15rem;
+  padding-top: 0.45rem;
+  border-top: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+}
+.btn-battle {
+  font-family: var(--font-display);
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  min-height: 64px;
+  border-radius: var(--r);
+  border-width: 1px;
+  border-style: solid;
+  cursor: pointer;
+  transition: filter 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 14%, transparent), 0 4px 16px rgba(0, 0, 0, 0.28);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.28rem;
+  padding: 0.4rem 0.25rem;
+}
+.btn-battle-glyph {
+  font-size: clamp(2.6rem, 6.5vw, 3.85rem);
+  line-height: 1;
+  font-weight: 700;
+  font-family: var(--font);
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.35));
+  opacity: 0.95;
+}
+.btn-battle-label {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  line-height: 1.05;
+}
+.btn-battle:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+.btn-attack {
+  background: linear-gradient(
+    165deg,
+    color-mix(in srgb, var(--bad) 55%, var(--accent)) 0%,
+    color-mix(in srgb, var(--bad) 35%, #1f0c0a) 100%
+  );
+  color: #fff8f4;
+  border-color: color-mix(in srgb, var(--bad) 42%, var(--line));
+}
+.btn-ability {
+  background: linear-gradient(
+    165deg,
+    color-mix(in srgb, var(--accent2) 88%, #e8f4fc) 0%,
+    color-mix(in srgb, var(--accent) 45%, #121d28) 100%
+  );
+  color: #121d28;
+  border-color: color-mix(in srgb, var(--accent2) 55%, var(--line));
+}
+.btn-retreat {
+  background: linear-gradient(
+    165deg,
+    color-mix(in srgb, var(--muted) 42%, #e8dfd4) 0%,
+    color-mix(in srgb, var(--muted) 22%, #14100c) 100%
+  );
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--muted) 38%, var(--line));
+}
+.btn-support {
+  background: linear-gradient(
+    165deg,
+    color-mix(in srgb, var(--you) 62%, #d4f5ee) 0%,
+    color-mix(in srgb, var(--you) 36%, #0a221c) 100%
+  );
+  color: #051a16;
+  border-color: color-mix(in srgb, var(--you) 48%, var(--line));
+}
+.btn-ghost-bar {
+  min-height: 44px;
+  width: auto;
+  min-width: 8rem;
+  flex: 0 1 auto;
+}
+.lock-hint,
+#gameErr,
+.online-commit-timer {
+  text-align: center;
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin: 0.35rem 0 0;
+}
+.online-commit-timer {
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.25);
+}
+.attack-gate-hint {
+  font-size: 0.78rem;
+  margin: 0 0 0.35rem;
+  color: var(--muted);
+  text-align: center;
+}
+.sheet-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: none;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 0;
+  padding-bottom: env(safe-area-inset-bottom);
+  background: rgba(6, 12, 22, 0.65);
+  backdrop-filter: blur(4px);
+}
+.sheet-overlay.is-open {
+  display: flex;
+}
+.sheet-panel {
+  width: 100%;
+  max-width: 44rem;
+  margin: 0 auto;
+  max-height: min(78vh, 560px);
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+  border: 1px solid var(--line);
+  border-bottom: none;
+  background: rgba(12, 20, 32, 0.52);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  padding: 0.6rem 0.75rem calc(0.75rem + env(safe-area-inset-bottom));
+  box-shadow: 0 -10px 44px rgba(0, 0, 0, 0.5), inset 0 1px 0 color-mix(in srgb, #fff 5%, transparent);
+}
+#attackGateOverlay.is-open {
+  align-items: flex-end;
+  padding: 0;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+#attackGatePanel.sheet-panel {
+  max-width: 44rem;
+}
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.55rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 90%, var(--accent));
+}
+.sheet-head h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1rem;
+}
+.move-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.move-row-label {
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-top: 0.35rem;
+}
+.btn-move {
+  text-align: left;
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: var(--r);
+  border: 1px solid color-mix(in srgb, var(--line) 85%, var(--accent));
+  background: color-mix(in srgb, var(--elev) 78%, transparent);
+  color: var(--text);
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 4%, transparent);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.btn-move:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+  background: color-mix(in srgb, var(--accent) 10%, var(--elev));
+}
+.btn-move:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.btn-move .ep {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.attack-gate-body,
+.attack-gate-fair {
+  font-size: 0.86rem;
+  margin: 0 0 0.65rem;
+  color: var(--muted);
+}
+.rps-row {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+.rps-btn {
+  flex: 1 1 28%;
+  min-width: 5rem;
+  padding: 0.58rem;
+  font-family: var(--font-display);
+  font-weight: 800;
+  border-radius: var(--r);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+  background: linear-gradient(165deg, color-mix(in srgb, var(--elev) 90%, var(--accent2)), var(--elev));
+  color: var(--text);
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 6%, transparent);
+  transition: border-color 0.15s ease, filter 0.15s ease;
+}
+.rps-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent2) 45%, var(--line));
+  filter: brightness(1.05);
+}
+.attack-gate-result {
+  margin-top: 0.65rem;
+  font-weight: 600;
+  color: var(--accent2);
+  text-align: center;
+}
+#fullFightText {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  max-height: 55vh;
+  overflow: auto;
+}
+.full-fight-actions {
+  margin-top: 0.65rem;
+}
+.stats-compare-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  padding: 0.75rem;
+  background: rgba(0, 0, 0, 0.82);
+  overflow: auto;
+}
+.stats-compare-overlay[hidden] {
+  display: none !important;
+}
+.stats-compare-inner {
+  width: min(960px, 100%);
+  margin: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 1rem 1.1rem 1.25rem;
+}
+.stats-compare-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+.stats-compare-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+@media (max-width: 800px) {
+  .stats-compare-cols {
+    grid-template-columns: 1fr;
+  }
+}
+.stats-compare-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 0.65rem 0.75rem;
+  font-size: 0.82rem;
+}
+.stats-compare-panel h3 {
+  margin: 0 0 0.25rem;
+  font-family: var(--font-display);
+  font-size: 0.95rem;
+}
+.stats-compare-note {
+  margin-top: 0.75rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+.stat-grade-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.stat-grade-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: inherit;
+}
+.foot {
+  margin-top: 1.5rem;
+  font-size: 0.68rem;
+  color: var(--muted);
+  text-align: center;
+}
+@media (max-width: 900px) {
+  .battle-layout {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto 1fr;
+    gap: 0.5rem 0.65rem;
+  }
+  .battle-rail {
+    position: relative;
+    top: auto;
+    max-height: none;
+    max-width: none;
+    min-width: 0;
+  }
+  .battle-rail--you {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .battle-rail--opp {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .battle-center-col {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    max-height: min(62vh, 560px);
+  }
+  .stat-compact.opp {
+    text-align: left;
+  }
+}
+@media (max-width: 520px) {
+  .battle-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto 1fr;
+  }
+  .battle-rail--you {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .battle-rail--opp {
+    grid-column: 1;
+    grid-row: 2;
+  }
+  .battle-center-col {
+    grid-column: 1;
+    grid-row: 3;
+    max-height: min(55vh, 480px);
+  }
+}
+@media (max-width: 720px) {
+  #actionPanel.action-bar-full {
+    grid-template-columns: 1fr;
+  }
+  .action-bar-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+@media (max-width: 380px) {
+  .action-bar-grid {
+    grid-template-columns: 1fr;
+  }
+}
+#gameScreen.online-arena-min .battle-layout {
+  max-width: none;
+}
+
+    </style>
+    <script defer src="assets/arena-app.js"></script>
+  </head>
+  <body>
+<div class="bg-grid" aria-hidden="true"></div>
+    <div class="wrap">
+      <header class="site-header">
+        <p class="brand-kicker">Combat simulator</p>
+        <h1 class="brand-title">ARENA</h1>
+        <p class="tag">Turn-based · stats use open points · HP scales with durability</p>
+      </header>
+
+      <section id="setupScreen" class="panel">
+        <div class="field" id="playModeRow">
+          <span class="mode-inline-label">Mode</span>
+          <div class="radio-row">
+            <label><input type="radio" name="playMode" value="ai" checked /> VS AI</label>
+            <label><input type="radio" name="playMode" value="online" /> Online (2 players)</label>
+          </div>
+        </div>
+        <div id="onlinePanel" class="online-panel online-flow" hidden>
+          <h2 class="online-flow-title">Online — two players</h2>
+          <p class="online-flow-sub">
+            Use the same site on two devices (or two browser tabs). <strong>Player 1</strong> creates the room and shares a code.
+            <strong>Player 2</strong> joins with that code. Then both lock a fighter; Player 1 starts the battle.
+          </p>
+
+          <div id="onlinePathsGrid" class="online-paths-grid">
+            <section class="online-path-card" id="onlineHostPathCard" aria-labelledby="onlineHostPathHeading">
+              <div class="online-path-badge" id="onlineHostPathHeading">Player 1 — Host</div>
+              <ol class="online-steps">
+                <li>Tap <strong>Create room</strong> (you get a code).</li>
+                <li>Send the code to Player 2 (message, voice, etc.).</li>
+                <li>In the form <strong>below</strong>, enter your fighter and tap <strong>Lock in your character</strong>.</li>
+                <li>When both players are locked, tap <strong>Begin battle</strong>.</li>
+              </ol>
+              <div class="online-row online-row-block">
+                <button type="button" id="onlineStartBtn" class="btn btn-ghost">Create room</button>
+              </div>
+              <div id="onlineCodeBlock" class="online-code-block" hidden>
+                <span class="online-code-label">Your room code</span>
+                <p class="online-code-digits" id="onlineCodeDisplay" aria-live="polite"></p>
+                <span class="online-code-hint">Tell Player 2 to enter this code under “Player 2 — Guest” (or in the join box if they still see it).</span>
+              </div>
+            </section>
+
+            <section class="online-path-card" id="onlineGuestPathCard" aria-labelledby="onlineGuestPathHeading">
+              <div class="online-path-badge" id="onlineGuestPathHeading">Player 2 — Guest</div>
+              <ol class="online-steps">
+                <li>Get the <strong>5-digit code</strong> from Player 1.</li>
+                <li>Type it in the box, then tap <strong>Join with code</strong>.</li>
+                <li>Enter <strong>your</strong> fighter in the panel that appears, then <strong>Lock in character</strong>.</li>
+                <li>Wait — Player 1 starts the match with <strong>Begin battle</strong>.</li>
+              </ol>
+              <div class="online-row online-row-block online-row-join">
+                <input
+                  id="onlineCodeInput"
+                  type="text"
+                  class="online-code-input"
+                  inputmode="numeric"
+                  maxlength="8"
+                  placeholder="Code"
+                  autocomplete="off"
+                  aria-label="5-digit room code from host"
+                />
+                <button type="button" id="onlineJoinBtn" class="btn btn-ghost">Join with code</button>
+              </div>
+            </section>
+          </div>
+
+          <p id="onlineStatus" class="online-status"></p>
+          <p id="onlineLobbyHint" class="online-lobby-hint" hidden></p>
+
+          <div id="guestCharPanel" class="online-path-card" hidden style="margin-top: 0.65rem">
+            <div class="online-path-badge">Your fighter (Player 2)</div>
+            <div class="field" style="margin-bottom: 0.5rem">
+              <label for="guestFighterInput">Character + series</label>
+              <input
+                id="guestFighterInput"
+                type="text"
+                autocomplete="off"
+                placeholder="e.g. Goku — Dragon Ball"
+                maxlength="500"
+              />
+            </div>
+            <button type="button" id="guestFighterLockBtn" class="btn btn-ghost">Lock in character</button>
+          </div>
+        </div>
+        <div id="setupFieldsWrap">
+          <p id="onlineHostFormCue" class="online-form-cue" hidden></p>
+          <div class="field">
+            <label for="you" id="labelYouPlayAs">You play as</label>
+            <input id="you" type="text" autocomplete="off" placeholder="Character + series" />
+          </div>
+          <div class="field" id="onlineHostLockWrap" hidden>
+            <button type="button" id="hostFighterLockBtn" class="btn btn-ghost">Lock in your character</button>
+          </div>
+          <div id="onlineBeginWrap" class="online-begin-wrap" hidden>
+            <p class="online-begin-hint">When the lobby says both fighters are locked, start the match for both players.</p>
+            <button type="button" id="onlineBeginBtn" class="btn">Begin battle</button>
+          </div>
+          <div class="field" id="setupRowOpp">
+            <label for="opp">Opponent</label>
+            <input id="opp" type="text" autocomplete="off" placeholder="Character + series" />
+          </div>
+          <div class="field" id="setupRowFirst">
+            <span style="display: block; margin-bottom: 0.3rem; font-size: 0.78rem; color: var(--muted); font-weight: 600"
+              >Who goes first</span
+            >
+            <div class="radio-row">
+              <label><input type="radio" name="first" value="player" checked /> You</label>
+              <label><input type="radio" name="first" value="opponent" /> Opponent</label>
+            </div>
+          </div>
+          <div class="field" id="setupRowArena">
+            <label for="arena">Arena intro (optional)</label>
+            <textarea id="arena" placeholder="Optional flavor for the opening…"></textarea>
+          </div>
+        </div>
+        <button type="button" id="startBtn" class="btn">Start battle</button>
+        <p id="setupErr" class="error" hidden></p>
+      </section>
+
+      <div id="setupLoading" class="setup-loading-overlay" hidden>
+        <div class="setup-loading-card">
+          <div class="spinner spinner-lg" aria-hidden="true"></div>
+          <p class="setup-loading-title">Building the match</p>
+          <p class="setup-loading-sub">Researching fighters, moves &amp; stats</p>
+        </div>
+      </div>
+
+      <section id="gameScreen" class="battle-full" aria-label="Battle">
+        <div class="battle-ambient" aria-hidden="true"></div>
+        <div id="introOverlay" class="intro-overlay" hidden>
+          <div class="intro-card">
+            <h3>Battle start</h3>
+            <p id="introText"></p>
+          </div>
+        </div>
+        <div id="oppThinking" class="opp-thinking" aria-live="polite" hidden>
+          <div class="loading-card">
+            <div class="spinner spinner-lg" aria-hidden="true"></div>
+            <span id="oppThinkingLabel">Opponent picks</span>
+          </div>
+        </div>
+
+        <div id="supportGenOverlay" class="support-gen-overlay" hidden aria-live="polite" aria-busy="true">
+          <div class="loading-card">
+            <div class="spinner spinner-lg" aria-hidden="true"></div>
+            <span id="supportGenLabel">Preparing ally…</span>
+            <p class="support-gen-hint">Researching moveset (or loading cache). Please wait — <strong>do not tap Support again</strong>.</p>
+          </div>
+        </div>
+
+        <div id="winnerBanner" class="winner" hidden></div>
+
+        <div class="battle-layout">
+          <aside class="battle-rail battle-rail--you" aria-label="Your fighter">
+            <div class="stat-compact you battle-rail-card">
+              <h2 id="youTitle">You</h2>
+              <div id="spriteYou" class="sprite-pill you battle-sprite-off" aria-hidden="true">You</div>
+              <div id="youFormLine" class="form-badge"></div>
+              <div class="bar-label">HP</div>
+              <div class="bar-outer bar-hp-wrap" id="youHpBarOuter" title="">
+                <div id="youHpBar" class="bar-fill you" style="width: 100%"></div>
+              </div>
+              <div class="bar-meta">
+                <span></span>
+                <span id="youHpText">0% / 100%</span>
+              </div>
+              <div class="bar-label">Energy</div>
+              <div class="bar-outer">
+                <div id="youEnBar" class="bar-fill energy-you" style="width: 100%"></div>
+              </div>
+              <div class="bar-meta">
+                <span></span>
+                <span id="youEnText">0% / 100%</span>
+              </div>
+              <div id="youStatuses" class="status-pills"></div>
+              <div id="youPassives" class="passives-block"></div>
+              <button type="button" id="btnCompareYou" class="btn-mini-stat">Graded stats</button>
+              <div id="youHudGrades" class="hud-grade-strip" aria-label="Feat letter grades"></div>
+            </div>
+          </aside>
+
+          <div class="battle-center-col">
+            <div class="battle-hud-mid battle-hud-mid--top">
+              <span class="battle-vs" aria-hidden="true">VS</span>
+              <span id="fatigueLine" class="battle-fatigue-label">Fatigue</span>
+            </div>
+            <main class="battle-feed">
+              <div class="battle-feed-top">
+                <button type="button" id="btnFullFight" class="btn-log-full">Full fight log</button>
+              </div>
+              <div class="battle-log-wrap">
+                <div id="log" class="log battle-log" aria-live="polite"></div>
+                <div id="retryBox" class="retry" hidden></div>
+              </div>
+            </main>
+          </div>
+
+          <aside class="battle-rail battle-rail--opp" aria-label="Opponent">
+            <div class="stat-compact opp battle-rail-card">
+              <h2 id="oppTitle">Opponent</h2>
+              <div id="spriteOpp" class="sprite-pill opp battle-sprite-off" aria-hidden="true">Foe</div>
+              <div id="oppFormLine" class="form-badge"></div>
+              <div class="bar-label">HP</div>
+              <div class="bar-outer bar-hp-wrap" id="oppHpBarOuter" title="">
+                <div id="oppHpBar" class="bar-fill opp" style="width: 100%"></div>
+              </div>
+              <div class="bar-meta">
+                <span></span>
+                <span id="oppHpText">0% / 100%</span>
+              </div>
+              <div class="bar-label">Energy</div>
+              <div class="bar-outer">
+                <div id="oppEnBar" class="bar-fill energy-opp" style="width: 100%"></div>
+              </div>
+              <div class="bar-meta">
+                <span></span>
+                <span id="oppEnText">0% / 100%</span>
+              </div>
+              <div id="oppStatuses" class="status-pills"></div>
+              <div id="oppPassives" class="passives-block"></div>
+              <button type="button" id="btnCompareOpp" class="btn-mini-stat">Graded stats</button>
+              <div id="oppHudGrades" class="hud-grade-strip" aria-label="Feat letter grades"></div>
+            </div>
+          </aside>
+        </div>
+
+        <div id="sheetAttack" class="sheet-overlay" role="dialog" aria-modal="true" aria-label="Attack moves">
+          <div class="sheet-panel">
+            <div class="sheet-head">
+              <h3>Attack</h3>
+              <button type="button" id="sheetAttackClose" class="btn btn-ghost btn-ghost-bar">Close</button>
+            </div>
+            <div id="attackMoveGrid" class="move-grid"></div>
+          </div>
+        </div>
+        <div id="sheetAbility" class="sheet-overlay" role="dialog" aria-modal="true" aria-label="Abilities">
+          <div class="sheet-panel">
+            <div class="sheet-head">
+              <h3>Abilities</h3>
+              <button type="button" id="sheetAbilityClose" class="btn btn-ghost btn-ghost-bar">Close</button>
+            </div>
+            <div id="abilityFormsBlock" class="move-grid"></div>
+            <div id="abilityOtherBlock" class="move-grid" style="margin-top: 0.75rem"></div>
+          </div>
+        </div>
+
+        <div id="sheetSupport" class="sheet-overlay" role="dialog" aria-modal="true" aria-label="Support allies">
+          <div class="sheet-panel">
+            <div class="sheet-head">
+              <h3>Support</h3>
+              <button type="button" id="sheetSupportClose" class="btn btn-ghost btn-ghost-bar">Close</button>
+            </div>
+            <p class="support-blurb" style="font-size: 0.78rem; color: var(--muted); margin: 0 0 0.65rem; line-height: 1.45">
+              Pick an ally: their <strong>moveset is researched on first use</strong> (or loaded from cache). They land <strong>one normal strike</strong> (no heavy). You gain <strong>+5%</strong> energy this beat. Each ally <strong>once per match</strong>.
+            </p>
+            <div id="supportFriendGrid" class="move-grid"></div>
+          </div>
+        </div>
+
+        <div id="attackGateOverlay" class="sheet-overlay" role="dialog" aria-modal="true" aria-label="Attack trial">
+          <div class="sheet-panel" id="attackGatePanel">
+            <div class="sheet-head">
+              <h3 id="attackGateTitle">Trial</h3>
+              <button type="button" id="attackGateClose" class="btn btn-ghost btn-ghost-bar">Close</button>
+            </div>
+            <p id="attackGateBody" class="attack-gate-body"></p>
+            <p id="attackGateFair" class="attack-gate-fair">Opponent throw is uniform random (crypto) — fair odds.</p>
+            <div id="attackGateRpsRow" class="rps-row">
+              <button type="button" class="rps-btn" id="rpsRock" data-pick="rock">Rock</button>
+              <button type="button" class="rps-btn" id="rpsPaper" data-pick="paper">Paper</button>
+              <button type="button" class="rps-btn" id="rpsScissors" data-pick="scissors">Scissors</button>
+            </div>
+            <p id="attackGateResult" class="attack-gate-result" hidden></p>
+          </div>
+        </div>
+
+        <div id="fullFightOverlay" class="sheet-overlay" role="dialog" aria-modal="true" aria-label="Full fight log">
+          <div class="sheet-panel">
+            <div class="sheet-head">
+              <h3>Full fight</h3>
+              <button type="button" id="fullFightClose" class="btn btn-ghost btn-ghost-bar">Close</button>
+            </div>
+            <pre id="fullFightText"></pre>
+            <div class="full-fight-actions">
+              <button type="button" id="fullFightCopy" class="btn btn-ghost">Copy text</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="statsCompareOverlay" class="stats-compare-overlay" hidden aria-modal="true" role="dialog" aria-label="Fighter comparison">
+          <div class="stats-compare-inner">
+            <header class="stats-compare-head">
+              <button type="button" id="statsCompareBack" class="btn btn-ghost">← Back</button>
+              <h2>Graded stat comparison</h2>
+            </header>
+            <div id="statsCompareBody" class="stats-compare-cols"></div>
+            <p class="stats-compare-note">
+              Wiki-style labels follow Attack Potency / durability on the standard tiering chart (Tier 7 = town–mountain, Tier 3 =
+              cosmic)—hax alone should not inflate them. Stat bars use a logarithmic 0–100 feat grade from open-point composites.
+              Combat uses techniqueFactor × BASE offense × forms; higher speed resolves first each beat.
+            </p>
+          </div>
+        </div>
+
+        <footer class="battle-bottom">
+          <p id="attackGateHint" class="attack-gate-hint" hidden></p>
+          <div id="actionPanel" class="action-bar-full">
+            <div class="action-bar-plans" aria-label="Plans">
+              <div class="plan-btn-wrap">
+                <button type="button" id="btnPlanDistract" class="btn-plan" title="Next Attack, Ability, or Support tries to distract (IQ vs IQ).">
+                  Distract
+                </button>
+                <span id="planDistractChance" class="plan-chance">—</span>
+              </div>
+              <div class="plan-btn-wrap">
+                <button type="button" id="btnPlanFeint" class="btn-plan" title="Next Retreat is a feint (fake-out, then pull back).">
+                  Feint
+                </button>
+                <span id="planFeintChance" class="plan-chance">—</span>
+              </div>
+              <button type="button" id="btnPlanClear" class="btn-plan-clear">Clear plan</button>
+            </div>
+            <div class="action-bar-center">
+              <div class="action-bar-grid">
+                <button type="button" id="btnAttack" class="btn-battle btn-attack">
+                  <span class="btn-battle-glyph" aria-hidden="true">⚔</span>
+                  <span class="btn-battle-label">Attack</span>
+                </button>
+                <button type="button" id="btnAbility" class="btn-battle btn-ability">
+                  <span class="btn-battle-glyph" aria-hidden="true">✦</span>
+                  <span class="btn-battle-label">Abilities</span>
+                </button>
+                <button type="button" id="btnRetreat" class="btn-battle btn-retreat">
+                  <span class="btn-battle-glyph" aria-hidden="true">↩</span>
+                  <span class="btn-battle-label">Retreat</span>
+                </button>
+                <button type="button" id="btnSupport" class="btn-battle btn-support">
+                  <span class="btn-battle-glyph" aria-hidden="true">◎</span>
+                  <span class="btn-battle-label">Support</span>
+                </button>
+              </div>
+            </div>
+            <div class="action-bar-modes" aria-label="Combat stance">
+              <div class="mode-label">Stance</div>
+              <div class="mode-grid">
+                <button type="button" class="btn-mode is-active" id="btnModeNormal" data-mode="normal">Normal</button>
+                <button type="button" class="btn-mode" id="btnModeCharge" data-mode="charge" title="0.5× energy, 0.5× attack, no heavy — no Retreat; +10% pool if your attack connects / isn’t hard-interrupted">Charge</button>
+                <button type="button" class="btn-mode" id="btnModeRage" data-mode="rage" title="1.3× attack, 1.5× energy — no Retreat">Rage</button>
+                <button type="button" class="btn-mode" id="btnModeDefensive" data-mode="defensive" title="0.6× attack, 1.3× defense — no Attack">Guard</button>
+              </div>
+              <p id="stanceMultHint" class="stance-hint" aria-live="polite"></p>
+            </div>
+            <div class="action-bar-extras">
+              <button type="button" id="rematchBtn" class="btn btn-ghost btn-ghost-bar" hidden>Rematch</button>
+              <button type="button" id="newBtn" class="btn btn-ghost btn-ghost-bar">New match</button>
+            </div>
+          </div>
+          <p id="lockHint" class="lock-hint"></p>
+          <p id="onlineCommitTimer" class="online-commit-timer" hidden></p>
+          <p id="turnLoading" class="loading" hidden style="justify-content: center; margin: 0.35rem 0 0">
+            <span class="spinner"></span>
+            <span id="turnLoadingLabel">Resolving…</span>
+          </p>
+          <p id="gameErr" class="error" hidden style="text-align: center; margin: 0.35rem 0 0"></p>
+        </footer>
+      </section>
+
+      <footer class="foot">Needs internet. Fiction game—verify canon yourself.</footer>
+    </div>
+  </body>
+</html>
