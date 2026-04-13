@@ -1505,7 +1505,15 @@ document.addEventListener("DOMContentLoaded", function () {
     _fallbackPickBeat: null,
     guestJoined: false,
     guestFighter: null,
+    _lastOnlineOkAt: 0,
+    _netConsecutiveFails: 0,
+    _guestSetupWaitT0: 0,
+    _hostLobbyWaitT0: 0,
   };
+
+  var ONLINE_FETCH_TIMEOUT_MS = 14000;
+  var ONLINE_FETCH_RETRIES = 2;
+  var ONLINE_STALL_WARN_MS = 25000;
 
   function onlineRoomBase() {
     return String(ONLINE_ROOM_WORKER_URL || "")
@@ -1513,27 +1521,87 @@ document.addEventListener("DOMContentLoaded", function () {
       .replace(/\/?$/, "/");
   }
 
+  function onlineDebugEnabled() {
+    try {
+      return localStorage.getItem("arena-online-debug") === "1";
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function onlineDebugLog() {
+    if (!onlineDebugEnabled() || !window.console) return;
+    var args = Array.prototype.slice.call(arguments);
+    args.unshift("[online]");
+    console.log.apply(console, args);
+  }
+
   function onlineFetch(path, opts) {
     var base = onlineRoomBase();
     if (!base) return Promise.reject(new Error("Set ONLINE_ROOM_WORKER_URL to your room worker URL."));
     var url = base + path.replace(/^\//, "");
-    return fetch(url, opts).then(function (res) {
-      return res.text().then(function (text) {
-        var data = null;
-        if (text) {
+    var options = opts || {};
+
+    function runAttempt(attempt) {
+      var controller = typeof AbortController === "function" ? new AbortController() : null;
+      var timer = null;
+      var merged = Object.assign({ cache: "no-store" }, options);
+      if (controller) merged.signal = controller.signal;
+      if (controller) {
+        timer = setTimeout(function () {
           try {
-            data = JSON.parse(text);
-          } catch (ignore) {
-            data = null;
+            controller.abort();
+          } catch (e) {}
+        }, ONLINE_FETCH_TIMEOUT_MS);
+      }
+      return fetch(url, merged)
+        .then(function (res) {
+          return res.text().then(function (text) {
+            var data = null;
+            if (text) {
+              try {
+                data = JSON.parse(text);
+              } catch (ignore) {
+                data = null;
+              }
+            }
+            if (!res.ok) {
+              var e = new Error((data && data.error) || text || "HTTP " + res.status);
+              e._status = res.status;
+              throw e;
+            }
+            if (data && data.ok === false && data.error) throw new Error(String(data.error));
+            _net._lastOnlineOkAt = Date.now();
+            _net._netConsecutiveFails = 0;
+            return data != null ? data : {};
+          });
+        })
+        .catch(function (err) {
+          _net._netConsecutiveFails += 1;
+          var msg = (err && err.message) || String(err);
+          var retriable =
+            msg.indexOf("NetworkError") !== -1 ||
+            msg.indexOf("Failed to fetch") !== -1 ||
+            msg.indexOf("Load failed") !== -1 ||
+            msg.indexOf("aborted") !== -1 ||
+            msg.indexOf("AbortError") !== -1 ||
+            (err && (err._status === 408 || err._status === 425 || err._status === 429 || err._status >= 500));
+          if (attempt < ONLINE_FETCH_RETRIES && retriable) {
+            var delay = 450 + attempt * 600;
+            onlineDebugLog("retry", attempt + 1, "in", delay + "ms", path, msg);
+            return new Promise(function (resolve) {
+              setTimeout(resolve, delay);
+            }).then(function () {
+              return runAttempt(attempt + 1);
+            });
           }
-        }
-        if (!res.ok) {
-          throw new Error((data && data.error) || text || "HTTP " + res.status);
-        }
-        if (data && data.ok === false && data.error) throw new Error(String(data.error));
-        return data != null ? data : {};
-      });
-    });
+          throw err;
+        })
+        .finally(function () {
+          if (timer != null) clearTimeout(timer);
+        });
+    }
+    return runAttempt(0);
   }
 
   function clearNetPollTimers() {
@@ -1700,15 +1768,20 @@ document.addEventListener("DOMContentLoaded", function () {
 
   function startHostLobbyPoll() {
     clearNetPollTimers();
+    _net._hostLobbyWaitT0 = Date.now();
     function tick() {
       if (_net.role !== "host" || !isOnlinePlaySelected() || !_net.code || !_net.secret) return;
       pollRoomOnce()
         .then(function (data) {
           updateHostLobbyFromPoll(data);
+          if (!_net.guestJoined && Date.now() - _net._hostLobbyWaitT0 > ONLINE_STALL_WARN_MS) {
+            setOnlineStatus("Still waiting for Player 2… if they joined, ask them to retry code / refresh once.");
+          }
           if (_net.role !== "host" || !isOnlinePlaySelected()) return;
           _net.hostPollTimer = setTimeout(tick, 1100);
         })
-        .catch(function () {
+        .catch(function (e) {
+          setOnlineStatus("Connection issue in host lobby; retrying… " + ((e && e.message) || ""));
           if (_net.role === "host" && isOnlinePlaySelected()) _net.hostPollTimer = setTimeout(tick, 2200);
         });
     }
@@ -1734,6 +1807,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
   function startGuestWaitingForSetup() {
     clearNetPollTimers();
+    _net._guestSetupWaitT0 = Date.now();
     function tick() {
       pollRoomOnce()
         .then(function (data) {
@@ -1748,10 +1822,14 @@ document.addEventListener("DOMContentLoaded", function () {
             setOnlineStatus("");
             return;
           }
+          if (Date.now() - _net._guestSetupWaitT0 > 180000) {
+            setOnlineStatus("Still waiting for host to start battle… ask host to tap Begin battle or recreate room.");
+          }
           _net.guestPollTimer = setTimeout(tick, 900);
         })
         .catch(function (e) {
-          setOnlineStatus((e && e.message) || String(e));
+          setOnlineStatus("Connection issue while waiting for setup; retrying… " + ((e && e.message) || ""));
+          _net.guestPollTimer = setTimeout(tick, 1500);
         });
     }
     tick();
@@ -1975,27 +2053,16 @@ document.addEventListener("DOMContentLoaded", function () {
 
   function pollRoomOnce() {
     if (!_net.code || !_net.secret) return Promise.reject(new Error("Not in a room."));
-    var u =
-      onlineRoomBase() +
+    var path =
       "api/room/" +
       encodeURIComponent(_net.code) +
       "/poll?secret=" +
       encodeURIComponent(_net.secret) +
       "&sinceBeat=" +
       encodeURIComponent(String(_net.lastBeat));
-    return fetch(u).then(function (res) {
-      return res.text().then(function (text) {
-        var data = null;
-        if (text) {
-          try {
-            data = JSON.parse(text);
-          } catch (ignore) {
-            data = null;
-          }
-        }
-        if (!res.ok || !data || !data.ok) throw new Error((data && data.error) || text || "Poll failed");
-        return data;
-      });
+    return onlineFetch(path, { method: "GET" }).then(function (data) {
+      if (!data || !data.ok) throw new Error((data && data.error) || "Poll failed");
+      return data;
     });
   }
 
@@ -2107,7 +2174,12 @@ document.addEventListener("DOMContentLoaded", function () {
           syncOnlineCommitDeadlineFromPoll(data);
           if (isOnlineBattle() && state && !state.over) _net.battlePollTimer = setTimeout(tick, 1100);
         })
-        .catch(function () {
+        .catch(function (e) {
+          var te = document.getElementById("onlineCommitTimer");
+          if (te && !state._submitBusy) {
+            te.removeAttribute("hidden");
+            te.textContent = "Network delay during turn sync; retrying… " + ((e && e.message) || "");
+          }
           if (isOnlineBattle() && state && !state.over) _net.battlePollTimer = setTimeout(tick, 2000);
         });
     }
@@ -2149,6 +2221,19 @@ document.addEventListener("DOMContentLoaded", function () {
         setTimeout(function () {
           waitForResolvedBeat().then(resolve);
         }, 750);
+      });
+    }).catch(function (e) {
+      var t0 = typeof _net._resolveWaitT0 === "number" ? _net._resolveWaitT0 : Date.now();
+      if (Date.now() - t0 > 210000) {
+        _net._resolveWaitT0 = 0;
+        throw new Error("Timed out waiting for resolve after network retries. Ask both players to refresh and rejoin.");
+      }
+      var lab = document.getElementById("oppThinkingLabel");
+      if (lab) lab.textContent = "Network hiccup; retrying resolve sync…";
+      return new Promise(function (resolve) {
+        setTimeout(function () {
+          waitForResolvedBeat().then(resolve);
+        }, 1000);
       });
     });
   }
@@ -5296,8 +5381,10 @@ document.addEventListener("DOMContentLoaded", function () {
       return;
     }
     setOnlineStatus("Creating room…");
+    onlineDebugLog("create room click");
     onlineFetch("api/room/create", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
       .then(function (data) {
+        onlineDebugLog("room created", data && data.code);
         resetHostOnlineCharUi();
         _net.role = "host";
         _net.code = data.code;
@@ -5312,6 +5399,7 @@ document.addEventListener("DOMContentLoaded", function () {
         startHostLobbyPoll();
       })
       .catch(function (e) {
+        onlineDebugLog("create room failed", (e && e.message) || e);
         setOnlineStatus((e && e.message) || String(e));
       });
   });
@@ -5330,12 +5418,14 @@ document.addEventListener("DOMContentLoaded", function () {
       return;
     }
     setOnlineStatus("Joining…");
+    onlineDebugLog("join room click", code);
     onlineFetch("api/room/join", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ code: code }),
     })
       .then(function (data) {
+        onlineDebugLog("joined room", data && data.code);
         _net.role = "guest";
         _net.code = data.code;
         _net.secret = data.guestSecret;
@@ -5345,6 +5435,7 @@ document.addEventListener("DOMContentLoaded", function () {
         syncOnlineSetupUI();
       })
       .catch(function (e) {
+        onlineDebugLog("join room failed", (e && e.message) || e);
         setOnlineStatus((e && e.message) || String(e));
       });
   });
