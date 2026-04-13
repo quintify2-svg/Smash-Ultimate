@@ -1360,6 +1360,7 @@ body.battle-active .brand-kicker {
 
     </style>
     <script>
+document.addEventListener("DOMContentLoaded", function () {
 (function () {
   "use strict";
 
@@ -5358,6 +5359,7 @@ body.battle-active .brand-kicker {
     closeFullFightOverlay();
   });
 })();
+});
 
 </script>
   </head>
@@ -5962,6 +5964,26 @@ body.battle-active .brand-kicker {
   }
 })();
 
+</script>
+  <script>
+document.addEventListener("DOMContentLoaded", function () {
+  var radios = document.querySelectorAll('input[name="playMode"]');
+  var onlinePanel = document.getElementById("onlinePanel");
+  if (!radios.length || !onlinePanel) return;
+
+  function syncModePanel() {
+    var selected = document.querySelector('input[name="playMode"]:checked');
+    var online = selected && selected.value === "online";
+    onlinePanel.hidden = !online;
+  }
+
+  radios.forEach(function (radio) {
+    radio.addEventListener("change", syncModePanel);
+    radio.addEventListener("click", syncModePanel);
+  });
+
+  syncModePanel();
+});
 </script>
   </body>
 </html>
