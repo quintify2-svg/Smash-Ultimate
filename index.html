@@ -1986,7 +1986,7 @@ document.addEventListener("DOMContentLoaded", function () {
       beginBtn.disabled = !(data.guestJoined && hostLocked && guestLocked);
     }
     if (!data.guestJoined) {
-      hint.textContent = "Waiting for Player 2 to join with your code.";
+      hint.textContent = "Waiting for Player 2 to join with your code… auto-checking.";
     } else if (!guestLocked) {
       hint.textContent = "Player 2 joined — waiting for them to lock their fighter.";
     } else if (!hostLocked) {
@@ -1997,25 +1997,35 @@ document.addEventListener("DOMContentLoaded", function () {
   }
 
   function startHostLobbyPoll() {
-    clearNetPollTimers();
+    if (_net.hostPollTimer != null) return;
     _net._hostLobbyWaitT0 = Date.now();
+    _net.hostPollTimer = -1;
     function tick() {
       if (_net.role !== "host" || !isOnlinePlaySelected() || !_net.code || !_net.secret) return;
       pollRoomOnce()
         .then(function (data) {
           updateHostLobbyFromPoll(data);
+          if (data && data.guestJoinedAt && Number(data.guestJoinedAt) > 0) {
+            var age = Date.now() - Number(data.guestJoinedAt);
+            if (age >= 0 && age < 6500) setOnlineStatus("Player 2 joined room — waiting for fighter lock.");
+          }
           if (!_net.guestJoined && Date.now() - _net._hostLobbyWaitT0 > ONLINE_STALL_WARN_MS) {
             setOnlineStatus("Still waiting for Player 2… if they joined, ask them to retry code / refresh once.");
           }
           if (_net.role !== "host" || !isOnlinePlaySelected()) return;
-          _net.hostPollTimer = setTimeout(tick, 1100);
+          _net.hostPollTimer = setTimeout(tick, 900);
         })
         .catch(function (e) {
           setOnlineStatus("Connection issue in host lobby; retrying… " + ((e && e.message) || ""));
-          if (_net.role === "host" && isOnlinePlaySelected()) _net.hostPollTimer = setTimeout(tick, 2200);
+          if (_net.role === "host" && isOnlinePlaySelected()) _net.hostPollTimer = setTimeout(tick, 1400);
         });
     }
     tick();
+  }
+
+  function ensureHostLobbyPolling() {
+    if (_net.role !== "host" || !isOnlinePlaySelected() || !_net.code || !_net.secret) return;
+    if (_net.hostPollTimer == null) startHostLobbyPoll();
   }
 
   function resetGuestCharPanelUi() {
@@ -2214,6 +2224,7 @@ document.addEventListener("DOMContentLoaded", function () {
       if (lblYou) lblYou.textContent = "Your fighter (Player 1)";
       var youInpH = document.getElementById("you");
       if (youInpH) youInpH.placeholder = "e.g. Goku — Dragon Ball";
+      ensureHostLobbyPolling();
     }
   }
 
@@ -2766,14 +2777,14 @@ document.addEventListener("DOMContentLoaded", function () {
     "Stand: time erase — skipped moments assault",
     "Stand: future sight — precognitive evade",
     "Stand: zipper dimension — portal seam travel",
-    "Stand: healing touch — repair allies mid-fight",
+    "Stand: healing touch — rapid mid-fight restoration",
     "Alchemy circle trap — floor glyph detonation",
     "Philosopher pulse — truth-seeking disintegration",
     "Ether gear overdrive — machine spirit fuse",
     "Satan soul partial — demon limb graft",
     "Takeover beast partial — animal trait morph",
     "Requip armor swap — instant loadout change",
-    "Celestial spirit gate — summon contract ally",
+    "Celestial spirit gate — summon contract entity",
     "Crash magic shatter — structural weakness break",
     "Ice-make dynamic — rapid ice weapon forge",
     "Fire dragon roar — breath cone",
@@ -2819,10 +2830,9 @@ document.addEventListener("DOMContentLoaded", function () {
     '  "playerNonAttack": [{ "name": string, "shortDesc": string }],\n' +
     '  "opponentAttacks": [ ... same as playerAttacks ... ],\n' +
     '  "opponentForms": [ ... ],\n' +
-    '  "opponentNonAttack": [ ... ],\n' +
-    '  "playerAlliesCanon": [{ "name": string, "series": string, "relationship": string }]\n' +
+    '  "opponentNonAttack": [ ... ]\n' +
     "}\n" +
-    "List **every** named / recognizable combat technique you can justify (≤28 entries per attacks array; merge duplicates in-description). Include form-locked and ultimates. Allies: 1–4 canon teammates the **player** could call—names only in this phase.\n";
+    "List **every** named / recognizable combat technique you can justify (≤28 entries per attacks array; merge duplicates in-description). Include form-locked and ultimates.\n";
 
   /** Phase 2 — fact-check draft; drop fanon, add gaps. */
   var BACKEND_SETUP_MOVE_VERIFY =
@@ -2830,7 +2840,7 @@ document.addEventListener("DOMContentLoaded", function () {
     "You receive **draftInventory** from phase 1. Treat it as a **working draft**, not frozen: you may **freely edit** it—**rename, merge, split, re-categorize (basic/ranged/heavy/quick), move between buckets, remove, or replace** entries when canon demands. **correctedInventory may fully replace** phase‑1 attack/form/nonAttack lists (not incremental-only)—rebuild clean canon lists if the draft is wrong. Remove fanon; add missing iconic moves; fix wrong categories or duplicate names.\n" +
     "Return:\n" +
     "{\n" +
-    '  "correctedInventory": { "playerAttacks": [...], "playerForms": [...], "playerNonAttack": [...], "opponentAttacks": [...], "opponentForms": [...], "opponentNonAttack": [...], "playerAlliesCanon": [...] },\n' +
+    '  "correctedInventory": { "playerAttacks": [...], "playerForms": [...], "playerNonAttack": [...], "opponentAttacks": [...], "opponentForms": [...], "opponentNonAttack": [...] },\n' +
     '  "added": [{ "side": "player"|"opponent", "bucket": string, "entry": object }],\n' +
     '  "removed": [{ "side": string, "bucket": string, "canonName": string, "reason": string }],\n' +
     '  "notes": string\n' +
@@ -2840,15 +2850,15 @@ document.addEventListener("DOMContentLoaded", function () {
   var BACKEND_REGISTRY_GENERATE_FIGHTER =
     "Arena **single-fighter generator**. JSON ONLY. Research canon deeply.\n" +
     "USER gives one line: character + series. Output the **same top-level JSON shape** as the main match setup, but with **player** = that character and **opponent** = a minimal mirror placeholder (same stats as player is OK for storage-only).\n" +
-    "Include full **playerMoveChart**, **playerAbilities**, **player** object with all required fields, **playerMaxHp**, **playerEnergy**, passives. **playerAlliesLite** / **playerCompanionRoster** optional (may be **[]** — flavor only).\n" +
+    "Include full **playerMoveChart**, **playerAbilities**, **player** object with all required fields, **playerMaxHp**, **playerEnergy**, passives.\n" +
     "Set **opponent** name to \"Training dummy\" if you need a filler; **opponentMoveChart** may be a single basic punch.\n";
 
   /** Revise a stored fighter JSON from user suggestions. */
   var BACKEND_FIGHTER_REVISE =
     "Arena **fighter revision**. JSON ONLY.\n" +
-    "You receive **previousFighterBundle** (cached JSON: fighter, moveChart, abilities, optional companions) and **userSuggestions** (free text).\n" +
-    "Apply suggestions: add/remove/fix moves, forms, nonAttack, passives, stats, allies **basicMove** rows—stay canon-accurate.\n" +
-    "Return **revisedBundle** with the same structure as previousFighterBundle (v, fighter, moveChart, abilities, companionRoster, companions arrays). Preserve v if present.\n";
+    "You receive **previousFighterBundle** (cached JSON: fighter, moveChart, abilities) and **userSuggestions** (free text).\n" +
+    "Apply suggestions: add/remove/fix moves, forms, nonAttack, passives, stats—stay canon-accurate.\n" +
+    "Return **revisedBundle** with the same structure as previousFighterBundle (v, fighter, moveChart, abilities). Preserve v if present.\n";
 
   var BACKEND_SETUP =
     "Arena combat. JSON ONLY; escape newlines (\\n). Research ALL canon media: manga, anime, movies, OVAs, games, novels, etc.—not manga-only.\n\n" +
@@ -2868,7 +2878,6 @@ document.addEventListener("DOMContentLoaded", function () {
     "**counterType** optional **reflect** | **absorb** with **reflectFraction** 0.05–1 for timed counters. buffTargets: **self** | **enemy** | **both** (default **self** for classic power-ups). **statusGrantSelf** / **statusGrantEnemy**: optional arrays of { type:buff|debuff|dot|cc, intensity, turnsLeft, label } the resolve step should apply when that ability is used (resolve may tweak numbers for balance). **healPercentMaxHp** / **barrierPercentMaxHp**: optional 0–25 hints for self recovery or shield strength. **description** must mention who is buffed and how.\n\n" +
     "healingPoints: 0 or lore scale (BASE).\n\n" +
     "passives: 0–4 per fighter. ONLY always-on / constantly active traits. stackType hits|rounds|none; maxStacks number|null.\n\n" +
-    "OPTIONAL LORE ALLIES (**not used in combat UI**): You may output **playerAlliesLite** / **playerCompanionRoster** as empty arrays **[]** or short flavor-only teammates for databases—**live duels use Endure** instead of ally strikes.\n\n" +
     "Return JSON:\n" +
     "{\n" +
     '  "player": {\n' +
@@ -2902,12 +2911,10 @@ document.addEventListener("DOMContentLoaded", function () {
     '  "opponentPassiveStacks": [ ... ],\n' +
     '  "playerStatuses": [],\n' +
     '  "opponentStatuses": [],\n' +
-    '  "playerCompanionRoster": [{ "id": string, "name": string, "series": string }],\n' +
-    '  "playerAlliesLite": [{ "id": string, "name": string, "series": string, "offensePoints": number, "durabilityPoints": number, "speedPoints": number, "staminaPoints": number, "healingPoints": number, "energyPoolMax": number, "basicMove": { "id": string, "name": string, "energyPercent": number, "techniqueFactor": number, "description": string } }],\n' +
     '  "introNarrative": string,\n' +
     '  "firstTurn": "player"|"opponent"\n' +
     "}\n\n" +
-    "Battle **status rows** start empty. **playerCompanions** may be omitted or [].\n\n" +
+    "Battle **status rows** start empty.\n\n" +
     "During resolve, statuses use type buff|debuff|dot|cc, turnsLeft (beats), intensity1–9—see resolve STATUS EFFECTS.\n\n" +
     "DOMAIN / TRIAL MOVES: If an opponent’s canon includes a **domain or trial** that blocks normal strikes until a minigame resolves (e.g. Deadly Sentencing), put the player’s **allowed finisher** on playerMoveChart with a stable id (e.g. Executioner Sword in **heavy**) so resolve can point **playerAttackGate.winMoveId** at it. During battle, resolve will set **playerAttackGate** so the client runs fair RPS for Attack only.\n\n" +
     "Initialize passive stacks at 0 unless canon says they start buffed. firstTurn must match user message.\n" +
@@ -2934,12 +2941,12 @@ document.addEventListener("DOMContentLoaded", function () {
     '    "abilityId": string|null\n' +
     "  }\n" +
     "}\n\n" +
-    "Rules: type **endure**: no ids; always legal unless a status forbids it. type attack requires category+moveId from opponentMoveChart (respect onlyInFormIds) AND energy cost ≤ opponentEnergy. **HEAVY CADENCE:** If **opponentLastMoveCategory** is **heavy**, you MUST NOT pick type **attack** with category **heavy** (pick another category, ability, endure, or retreat). type ability **form**: only if chain prerequisites satisfied (0 energy). type ability **nonAttack**: cost ≤ opponentEnergy and form locks OK. retreat: only if affordable. If nothing valid, valid:false with retryMessage." +
+    "Rules: type **endure**: no ids; only legal when opponent stance is **normal** or **defensive** (if known) and no status forbids it. type attack requires category+moveId from opponentMoveChart (respect onlyInFormIds) AND energy cost ≤ opponentEnergy. **HEAVY CADENCE:** If **opponentLastMoveCategory** is **heavy**, you MUST NOT pick type **attack** with category **heavy** (pick another category, ability, endure, or retreat). type ability **form**: only if chain prerequisites satisfied (0 energy) and **opponentLastMoveCategory** is not **form** (no back-to-back transforms). type ability **nonAttack**: cost ≤ opponentEnergy and form locks OK. retreat: only if affordable. If nothing valid, valid:false with retryMessage." +
     ANIME_TROPE_ABILITY_CATALOG_APPEND;
 
   var BACKEND_COMPANION_GENERATE =
-    "Generate **one** ally’s **full** combat sheet for Support. JSON ONLY; escape newlines.\n\n" +
-    "You receive: ALLY { id, name, series }, PLAYER summary, OPPONENT summary, DATABASE REGISTRY. If registry or canon implies this character already has a known tier, stay consistent. Ally should usually be **weaker** than the main player unless lore says otherwise.\n\n" +
+    "Generate **one** extra roster sheet. JSON ONLY; escape newlines.\n\n" +
+    "You receive: ENTITY { id, name, series }, PLAYER summary, OPPONENT summary, DATABASE REGISTRY. If registry or canon implies this character already has a known tier, stay consistent.\n\n" +
     "Output the same move/energy rules as main setup: moveChart basic/ranged/heavy/quick (≤10 each), playerAbilities { forms, nonAttack }, BASE stats (durabilityPoints, offensePoints, speedPoints, staminaPoints, healingPoints, energyPoolMax), wikiTierLabel optional.\n\n" +
     "Return:\n" +
     "{\n" +
@@ -2954,12 +2961,13 @@ document.addEventListener("DOMContentLoaded", function () {
     '    "playerAbilities": { "forms": [...], "nonAttack": [...] }\n' +
     "  }\n" +
     "}\n\n" +
-    "If you cannot research the ally, valid:false with retryMessage." +
+    "If you cannot research the entity, valid:false with retryMessage." +
     ANIME_TROPE_ABILITY_CATALOG_APPEND;
 
   var BACKEND_RESOLVE =
     "Resolve one beat; both actions revealed. JSON ONLY; escape newlines.\n\n" +
     "**CLIENT TACTICS (mandatory read):** The JSON includes **playerTacticsSummary** { combatMode, plan, feintRetreat, planContext } — the player’s **confirmed** stance and plan for this beat. It duplicates **playerAction** fields; **they must agree**. Always apply **playerCombatMode** energy rules and **plan** (distract/feint) when present. **playerPlanArmed** at top level matches what they armed before submit.\n\n" +
+    "**FORM TRANSITIONS (mandatory read):** GAME STATE includes **formTransitionContext** { playerOldFormId, playerNewFormId, opponentCurrentFormId } and playerAction.formTransition when relevant. If a form action is used, update effective stats/HP-cap/energy-cap from the **new** form and narrate old→new briefly.\n\n" +
     "SPEED ORDER: Compare BASE speedPoints × activeForm.statModifiers.speedMult (default 1) for each fighter. The higher value resolves damaging attacks and offensive abilities FIRST this beat; on a tie, player goes first. Retreats are still resolved with the retreat rules below (simultaneous intent).\n\n" +
     "EFFECTIVE STATS: For any combat math, use BASE × relevant form statModifiers (offenseMult, speedMult, durabilityMult, staminaMult, healingMult, energyPoolMult). If a modifier is missing, treat as 1. BASE numbers are fixed for the match—forms only multiply.\n\n" +
     "ENERGY: **Form / transformation (abilityKind form) costs 0 energy** — never deduct for switching forms. **Endure costs 0.** Other actions: cost = ceil(effectivePoolMax × energyPercent/100) with minimum **1** unit when energyPercent > 0 (or 1% pool min for **retreat**). Retreat and paid attacks/abilities still respect stance multipliers on the **player** side.\n\n" +
@@ -2977,13 +2985,13 @@ document.addEventListener("DOMContentLoaded", function () {
     "- basic & heavy (melee commit): if the target retreated and target speedPoints > attacker speedPoints, the attack misses or only chips; if attacker is faster, it lands as usual.\n" +
     "- quick & ranged vs retreating target: if attacker speedPoints > target speedPoints, the attack ALWAYS hits (full damage rules). If attacker speed ≤ target speed, roll hit chance P = attackerSpeed / (attackerSpeed + targetSpeed) once—if hit, full damage; if miss, no damage (narrate graze/narrow miss). When speeds are equal, P = 0.5.\n" +
     "STATUS EFFECTS (timed buffs/debuffs from attacks & abilities): Each entry is { type, intensity, turnsLeft, label }. **type** must be one of: **buff** (shields, regen, haste), **debuff** (slow, weaken, vulnerable, mark, armor break), **dot** (poison, burn, bleed, corrosion), **cc** (stun, daze, freeze, sleep, root/bind—hard control). **intensity** 1–9 = severity or DoT tier (higher = stronger ticks or deeper slow). **turnsLeft** = **full beats remaining** after this resolve (integer ≥0); the client shows beats as “t”. **At end of every resolve**, decrement **turnsLeft by 1** on each status for **both** fighters, then **delete** rows at 0 before outputting playerStatuses/opponentStatuses.\n\n" +
-    "**When to apply:** Inflict on **successful hits** or when a **self/ally buff** or **grounded field** explicitly grants it. Cleanses and immunities may remove or shorten in the same beat if canon-justified.\n\n" +
+    "**When to apply:** Inflict on **successful hits** or when a **self-buff** or **grounded field** explicitly grants it. Cleanses and immunities may remove or shorten in the same beat if canon-justified.\n\n" +
     "**Narrative:** In your **narrative** (within the 4-sentence cap), **name the effect** and **state the duration in beats** when you **apply, extend, refresh, or cleanse** it (e.g. “Poison stacks for **three beats**”).\n\n" +
     "**Duration guide (competitive):** **cc** 1–2 beats (stun rarely above 2); **soft debuff** 2–4; **dot** 2–5 (longer = lower per-tick %); **buff** 2–4 unless domain-wide. Re-apply: **refresh** turnsLeft to the new value or **max(old,new)**; for **dot**, either **+1 intensity** (cap 9) **or** refresh duration—not both every beat unless a special passive says so.\n\n" +
     "**DoT & HP:** Each beat while **dot** remains, chip via HP (typical **~0.04%–0.55% maxHp per tick** × intensity) in addition to direct hits, or fold into fatigue—**stay consistent**.\n\n" +
     "Forms/status/DoT/passives stacks. lastMoveCategory: basic|ranged|heavy|quick|heal|buff|form|retreat|endure|other|integration.\n\n" +
-    "**HEAVY CADENCE (mandatory):** A fighter cannot use **moveChart.heavy** on **two consecutive beats**. If **playerAction** is attack category **heavy** while **playerLastMoveCategory** is **heavy**, output **valid:false** with **retryMessage** explaining the cadence lock. Same check for **opponentAction** vs **opponentLastMoveCategory**. Any **non-heavy** action (basic/ranged/quick, ability, retreat, **endure**, integration, etc.) lifts the lock for the next beat. **Also:** if **playerCombatMode** is **charge**, the player **cannot** use **heavy** this beat—**valid:false** if they try.\n\n" +
-    "**COMBAT STANCE (player only; client switches for free):** GAME STATE includes **playerCombatMode**: **normal** | **charge** | **rage** | **defensive**. Match **playerAction.playerCombatMode** to state. **resolveEffectiveStats.player** already bakes **attack**/**durability** mults for stance—trust them for damage/soak. You must still apply **stance energy multipliers** to the **player’s** paid costs this beat: **charge** costs **×0.5** (min 1 unit after calc); **rage** costs **×1.5** (ceil); **normal**/**defensive** **×1**. **charge** also forbids **heavy** attacks. **rage** and **charge:** player **cannot** **retreat** — if **playerAction** is **retreat**, **valid:false**. **defensive (guard):** player **cannot** **attack** — if **playerAction.type** is **attack** and it is **not** a mandatory **rps_shoot** **win** resolution (**attackGateResolution.outcome** **win** fulfilling **playerAttackGate**), **valid:false**. Abilities, **Endure**, Retreat where stance allows, integration losses/ties are fine in guard. Narrate stance flavor briefly when it matters.\n\n" +
+    "**HEAVY CADENCE (mandatory):** A fighter cannot use **moveChart.heavy** on **two consecutive beats**. If **playerAction** is attack category **heavy** while **playerLastMoveCategory** is **heavy**, output **valid:false** with **retryMessage** explaining the cadence lock. Same check for **opponentAction** vs **opponentLastMoveCategory**. Any **non-heavy** action (basic/ranged/quick, ability, retreat, **endure**, integration, etc.) lifts the lock for the next beat. **Also:** if **playerCombatMode** is **charge**, the player **cannot** use **heavy** this beat—**valid:false** if they try. **FORM CADENCE:** no side may use **abilityKind:\"form\"** twice in a row (if lastMoveCategory is form, next form action is invalid).\n\n" +
+    "**COMBAT STANCE (player only; client switches for free):** GAME STATE includes **playerCombatMode**: **normal** | **charge** | **rage** | **defensive**. Match **playerAction.playerCombatMode** to state. **resolveEffectiveStats.player** already bakes **attack**/**durability** mults for stance—trust them for damage/soak. You must still apply **stance energy multipliers** to the **player’s** paid costs this beat: **charge** costs **×0.5** (min 1 unit after calc); **rage** costs **×1.5** (ceil); **normal**/**defensive** **×1**. **charge** also forbids **heavy** attacks. **rage** and **charge:** player **cannot** **retreat** — if **playerAction** is **retreat**, **valid:false**. **Endure** is only legal in **normal** or **defensive** stance. **defensive (guard):** player **cannot** **attack** — if **playerAction.type** is **attack** and it is **not** a mandatory **rps_shoot** **win** resolution (**attackGateResolution.outcome** **win** fulfilling **playerAttackGate**), **valid:false**. Abilities, Endure (in allowed stance), Retreat where stance allows, integration losses/ties are fine in guard. Narrate stance flavor briefly when it matters.\n\n" +
     "**PLANS (playerAction.plan + planContext):** **plan** is null | **distract** | **feint**. **planContext** has **playerIntelligence**, **opponentIntelligence** (0–100; treat null IQ as **50**), **opponentDistractResistance**, **distractSuccessChanceHint** and **feintSuccessChanceHint** (each 0–1; client-estimated guides), **playerRetreatFailStacks** (0–8).\n" +
     "- **distract** (only with player **attack**, **ability**, or **endure**—client enforced): Opponent may be mentally baited. Compute distract chance = **clamp(0.40 + (playerIQ−opponentIQ)/100×0.38 − opponentDistractResistance×0.11, 0.06, 0.88)**; stay within **±0.06** of **distractSuccessChanceHint** unless narrative strongly justifies. **Success:** opponent’s **offensive action fizzles or barely chips** this beat (no solid hit); in narrative say they were caught off-guard; set **opponentLastMoveCategory** to **other** or similar; **increment opponentDistractResistance by 1** in your output (cap 99). **Fail:** resolve opponent offense normally. Player’s action still resolves either way.\n" +
     "- **feint** with **type retreat** and **feintRetreat:true**: A fake-out into retreat—resolve as **retreat** but describe the misread. Use **feintSuccessChanceHint** as a soft guide (±0.08) for whether the foe **bites** on the fake (worse punish / cleaner spacing when it lands narratively); still follow retreat speed rules.\n\n" +
@@ -2992,7 +3000,7 @@ document.addEventListener("DOMContentLoaded", function () {
     "SPECIAL ATTACK GATES — playerAttackGate in GAME STATE: When non-null, the real client **replaces the attack picker** with **Rock / Paper / Scissors** (three buttons). The **opponent throw is drawn uniformly at random in-browser** (crypto); **honor** playerAction’s playerPick, opponentPick, and RPS outcome — do not re-roll or contradict.\n\n" +
     "CLIENT UI IDS (for your prompts / future builders): overlay #attackGateOverlay; panel #attackGatePanel; title #attackGateTitle; body #attackGateBody; fair line #attackGateFair; buttons #rpsRock #rpsPaper #rpsScissors (attribute data-pick = rock|paper|scissors); result #attackGateResult; close #attackGateClose. **Only the Attack button** uses this sheet; Abilities, **Endure**, and Retreat stay available unless a status forbids them.\n\n" +
     "You output **playerAttackGate** when a trial/domain (etc.) blocks normal strikes until Shoot resolves; use **null** to clear. Shape: { kind: \"rps_shoot\", id: string, title: string, body: string, winCategory: \"basic\"|\"ranged\"|\"heavy\"|\"quick\", winMoveId: string, winLabel: string|null }. winMoveId **must** exist on playerMoveChart[winCategory]. body should state: **win** → only winMoveId strike; **lose** → trial breaks; **tie** → judgment continues, **opponent tempo** (set nextTurn opponent when trial persists).\n\n" +
-    "**ENDURE (playerAction.type \"endure\"):** { type:\"endure\" } — the player **does not attack or ability** this beat; they **brace** and **accept** the opponent’s offense (no retreat-speed **evade**—tank the exchange). **Costs 0 energy.** After resolving incoming damage (and counters / self-recoil from **their** side if any), add **+25%** of the player’s **effective energyPoolMax** to **playerEnergy** (clamp). **Do not** apply the stamina-based **passive energy recharge** to the **player** this beat (still apply **endure** grant, retreat bonus, charge flow rebate, etc.). **playerLastMoveCategory** **endure**. **Mirror** the same rules for **opponentAction.type \"endure\"** on the opponent (their +25%, skip **their** passive recharge this beat).\n\n" +
+    "**ENDURE (playerAction.type \"endure\"):** { type:\"endure\" } — only valid in **normal** or **defensive** stance. The player **does not attack or ability** this beat; they **brace** and **accept** the opponent’s offense (no retreat-speed **evade**—tank the exchange). **Costs 0 energy.** After resolving incoming damage (and counters / self-recoil from **their** side if any), add **+25%** of the player’s **effective energyPoolMax** to **playerEnergy** (clamp). **Do not** apply the stamina-based **passive energy recharge** to the **player** this beat (still apply **endure** grant, retreat bonus, charge flow rebate, etc.). **playerLastMoveCategory** **endure**. **Mirror** the same rules for **opponentAction.type \"endure\"** on the opponent (their +25%, skip **their** passive recharge this beat) when their stance rules allow it.\n\n" +
     "playerAction extensions: (1) RPS **win**: type attack + category + moveId matching gate + attackGateResolution { kind:\"rps_shoot\", gateId, outcome:\"win\", playerPick, opponentPick } — resolve that attack with normal energy/damage; clear gate if trial ends. (2) RPS **lose** or **tie**: type **integration** with integrationKind \"rps_shoot\", integrationId, outcome lose|tie, playerPick, opponentPick — **no normal player attack** this beat; lose: strip suppressing domain/trial and clear gate; tie: usually **keep gate** and prefer nextTurn opponent; integration costs **0 energy** unless narrative says otherwise.\n\n" +
     "Return:\n" +
     "{\n" +
@@ -3182,7 +3190,7 @@ document.addEventListener("DOMContentLoaded", function () {
   function runAiSetupWithPhases(you, opp, firstVal, arena, reg) {
     var userLine = buildUserSetupInputLine(you, opp, firstVal, arena);
     var regStr = JSON.stringify(reg || []);
-    setSetupLoadingPhase("Phase 1/3 — listing canon moves & allies…");
+    setSetupLoadingPhase("Phase 1/3 — listing canon moves…");
     var draftPrompt =
       BACKEND_SETUP_MOVE_DRAFT +
       "\n\n=== DATABASE REGISTRY ===\n" +
@@ -3596,7 +3604,7 @@ document.addEventListener("DOMContentLoaded", function () {
       h += "<h4>Non-attack</h4><pre>" + escapeHtml(JSON.stringify(na, null, 2)) + "</pre>";
     }
     if (b.companions && b.companions.length) {
-      h += "<h4>Allies (cached)</h4><pre>" + escapeHtml(JSON.stringify(b.companions, null, 2)) + "</pre>";
+      h += "<h4>Extra cache rows</h4><pre>" + escapeHtml(JSON.stringify(b.companions, null, 2)) + "</pre>";
     }
     return h;
   }
@@ -3983,6 +3991,18 @@ document.addEventListener("DOMContentLoaded", function () {
     return Math.max(1, Math.round((Number(base) || 0) * m));
   }
 
+  function getEffectiveHpCap(side) {
+    if (!state) return 0;
+    var f = side === "you" ? state.player : state.opponent;
+    var baseMax = side === "you" ? state.playerMaxHp : state.opponentMaxHp;
+    if (!f) return Math.max(1, Number(baseMax) || 1);
+    var ab = side === "you" ? state.playerAbilities : state.opponentAbilities;
+    var fid = side === "you" ? state.playerActiveFormId : state.opponentActiveFormId;
+    var sm = getFormStatMods(ab, fid);
+    var duraEff = (Number(f.durabilityPoints) || 1) * (Number(sm.durabilityMult) || 1);
+    return Math.max(1, maxHpFromDurability(duraEff));
+  }
+
   function getPlayerCombatModeSpec() {
     if (!state) return COMBAT_MODES.normal;
     var id = String(state.playerCombatMode || "normal").toLowerCase();
@@ -4005,6 +4025,7 @@ document.addEventListener("DOMContentLoaded", function () {
     if (!state || state.over || state._actionUiLocked) return;
     var atk = document.getElementById("btnAttack");
     var ret = document.getElementById("btnRetreat");
+    var end = document.getElementById("btnEndure");
     var pf = document.getElementById("btnPlanFeint");
     var guard = isGuardStance();
     var rage = isRageStance();
@@ -4025,6 +4046,13 @@ document.addEventListener("DOMContentLoaded", function () {
           ? "Rage: no retreat. Change stance or use Attack / Abilities / Endure."
           : "Charge: no retreat. Change stance or use Attack / Abilities / Endure."
         : "";
+    }
+    if (end) {
+      var noEnd = rage || charge;
+      end.disabled = noEnd;
+      end.title = noEnd
+        ? "Endure is available only in Normal or Guard."
+        : "Brace and tank this beat; +25% energy, but no passive recharge.";
     }
     if (pf) {
       pf.disabled = rage || charge;
@@ -4213,7 +4241,9 @@ document.addEventListener("DOMContentLoaded", function () {
     var f = side === "you" ? state.player : state.opponent;
     var chart = side === "you" ? state.playerMoveChart : state.opponentMoveChart;
     var ab = side === "you" ? state.playerAbilities : state.opponentAbilities;
-    var energyCap = side === "you" ? state.playerEnergyMax : state.opponentEnergyMax;
+    var ef = buildResolveEffectiveSnapshot(side);
+    var energyCap = getEffectiveEnergyCap(side);
+    var hpCap = getEffectiveHpCap(side);
     var tier = getThreatTierMeta(f);
     var wikiLab = String(f.wikiTierLabel || "").trim();
     var wikiMac = String(f.wikiTierMacro || "").trim();
@@ -4231,6 +4261,8 @@ document.addEventListener("DOMContentLoaded", function () {
         (wikiMac && wikiLab ? " · " + escapeHtml(wikiMac) : "") +
         "</div>";
     }
+    var activeFormId = side === "you" ? state.playerActiveFormId : state.opponentActiveFormId;
+    h += '<div class="scaling-meta">Active form: ' + escapeHtml(activeFormId || "base") + "</div>";
     h +=
       '<div class="threat-badge" title="Legacy slug tier (floor reference)">' +
       escapeHtml(tier.label) +
@@ -4261,12 +4293,13 @@ document.addEventListener("DOMContentLoaded", function () {
     h += '<h4 class="graded-section-title">Combat ratings (feat composites)</h4>';
 
     var gradedRows = [
-      { label: "Durability", val: f.durabilityPoints, floor: tier.floorDura },
-      { label: "Offense", val: f.offensePoints, floor: tier.floorOff },
-      { label: "Speed", val: f.speedPoints, floor: tier.floorSpd },
-      { label: "Stamina", val: f.staminaPoints, floor: tier.floorSta },
-      { label: "Healing", val: f.healingPoints || 0, floor: Math.max(0.5, tier.floorHeal) },
+      { label: "Durability", val: ef.durabilityEffective, floor: tier.floorDura },
+      { label: "Offense", val: ef.offenseEffective, floor: tier.floorOff },
+      { label: "Speed", val: ef.speedEffective, floor: tier.floorSpd },
+      { label: "Stamina", val: ef.staminaEffective, floor: tier.floorSta },
+      { label: "Healing", val: ef.healingEffective || 0, floor: Math.max(0.5, tier.floorHeal) },
       { label: "Energy pool", val: energyCap, floor: tier.floorEn },
+      { label: "HP cap", val: hpCap, floor: tier.floorDura },
     ];
 
     gradedRows.forEach(function (row) {
@@ -4656,13 +4689,14 @@ document.addEventListener("DOMContentLoaded", function () {
     if (!state) return "";
     var f = side === "you" ? state.player : state.opponent;
     if (!f) return "";
-    var energyCap = side === "you" ? state.playerEnergyMax : state.opponentEnergyMax;
+    var ef = buildResolveEffectiveSnapshot(side);
+    var energyCap = getEffectiveEnergyCap(side);
     var gradedRows = [
-      { label: "Dura", val: f.durabilityPoints },
-      { label: "Off", val: f.offensePoints },
-      { label: "Spd", val: f.speedPoints },
-      { label: "Sta", val: f.staminaPoints },
-      { label: "Heal", val: f.healingPoints || 0 },
+      { label: "Dura", val: ef.durabilityEffective },
+      { label: "Off", val: ef.offenseEffective },
+      { label: "Spd", val: ef.speedEffective },
+      { label: "Sta", val: ef.staminaEffective },
+      { label: "Heal", val: ef.healingEffective || 0 },
       { label: "En", val: energyCap },
     ];
     var sumFeat = 0;
@@ -4700,10 +4734,14 @@ document.addEventListener("DOMContentLoaded", function () {
 
   function renderBars() {
     if (!state) return;
-    var pm = state.playerMaxHp;
-    var om = state.opponentMaxHp;
+    var pm = getEffectiveHpCap("you");
+    var om = getEffectiveHpCap("opp");
+    state.playerHp = clamp(Number(state.playerHp) || 0, 0, pm);
+    state.opponentHp = clamp(Number(state.opponentHp) || 0, 0, om);
     var pem = getEffectiveEnergyCap("you");
     var oem = getEffectiveEnergyCap("opp");
+    state.playerEnergy = clamp(Number(state.playerEnergy) || 0, 0, pem);
+    state.opponentEnergy = clamp(Number(state.opponentEnergy) || 0, 0, oem);
     document.getElementById("youHpBar").style.width = pm > 0 ? (state.playerHp / pm) * 100 + "%" : "0%";
     document.getElementById("oppHpBar").style.width = om > 0 ? (state.opponentHp / om) * 100 + "%" : "0%";
     document.getElementById("youHpText").textContent =
@@ -5278,8 +5316,8 @@ document.addEventListener("DOMContentLoaded", function () {
     var pHpBefore = prev ? prev.playerHp : state.playerHp;
     var oHpBefore = prev ? prev.opponentHp : state.opponentHp;
 
-    state.playerHp = clamp(Number(r.playerHp), 0, state.playerMaxHp);
-    state.opponentHp = clamp(Number(r.opponentHp), 0, state.opponentMaxHp);
+    state.playerHp = Number(r.playerHp);
+    state.opponentHp = Number(r.opponentHp);
     state.fatiguePlayer = clamp(Number(r.fatiguePlayer), 0, 100);
     state.fatigueOpponent = clamp(Number(r.fatigueOpponent), 0, 100);
     if (Array.isArray(r.playerStatuses)) state.playerStatuses = normalizeStatuses(r.playerStatuses);
@@ -5308,6 +5346,8 @@ document.addEventListener("DOMContentLoaded", function () {
     if (r.opponentLastMoveCategory) state.opponentLastMoveCategory = r.opponentLastMoveCategory;
     if (r.playerActiveFormId !== undefined) state.playerActiveFormId = r.playerActiveFormId ? String(r.playerActiveFormId) : null;
     if (r.opponentActiveFormId !== undefined) state.opponentActiveFormId = r.opponentActiveFormId ? String(r.opponentActiveFormId) : null;
+    state.playerHp = clamp(Number(state.playerHp) || 0, 0, getEffectiveHpCap("you"));
+    state.opponentHp = clamp(Number(state.opponentHp) || 0, 0, getEffectiveHpCap("opp"));
     state.playerEnergy = clamp(Number(r.playerEnergy), 0, getEffectiveEnergyCap("you"));
     state.opponentEnergy = clamp(Number(r.opponentEnergy), 0, getEffectiveEnergyCap("opp"));
     if (r.valid) {
@@ -5440,6 +5480,8 @@ document.addEventListener("DOMContentLoaded", function () {
       opponentAbilities: state.opponentAbilities,
       playerActiveFormId: state.playerActiveFormId,
       opponentActiveFormId: state.opponentActiveFormId,
+      playerEffectiveHpMax: getEffectiveHpCap("you"),
+      opponentEffectiveHpMax: getEffectiveHpCap("opp"),
       resolveEffectiveStats: {
         player: buildResolveEffectiveSnapshot("you"),
         opponent: buildResolveEffectiveSnapshot("opp"),
@@ -5475,6 +5517,14 @@ document.addEventListener("DOMContentLoaded", function () {
       feintRetreat: !!enriched.feintRetreat,
       planContext: enriched.planContext || {},
     };
+    o.formTransitionContext = {
+      playerOldFormId: state.playerActiveFormId || null,
+      playerNewFormId:
+        enriched.type === "ability" && enriched.abilityKind === "form" && enriched.abilityId
+          ? String(enriched.abilityId)
+          : null,
+      opponentCurrentFormId: state.opponentActiveFormId || null,
+    };
     return BACKEND_RESOLVE + "\n\n=== GAME STATE (JSON) ===\n" + JSON.stringify(o);
   }
 
@@ -5490,6 +5540,14 @@ document.addEventListener("DOMContentLoaded", function () {
         planContext: enriched.planContext || {},
       },
     });
+    resolveState.formTransitionContext = {
+      playerOldFormId: state.playerActiveFormId || null,
+      playerNewFormId:
+        enriched.type === "ability" && enriched.abilityKind === "form" && enriched.abilityId
+          ? String(enriched.abilityId)
+          : null,
+      opponentCurrentFormId: state.opponentActiveFormId || null,
+    };
     return (
       BACKEND_BEAT_ONE_SHOT +
       "\n\n=== OPPONENT PICK — GAME STATE (no sealed player move) ===\n" +
@@ -5510,6 +5568,10 @@ document.addEventListener("DOMContentLoaded", function () {
 
   function validateStanceAgainstAction(action) {
     if (!state || !action) return true;
+    if ((isRageStance() || isChargeStance()) && action.type === "endure") {
+      setGameErr((isRageStance() ? "Rage" : "Charge") + " stance: Endure is allowed only in Normal or Guard.");
+      return false;
+    }
     if ((isRageStance() || isChargeStance()) && action.type === "retreat") {
       setGameErr(
         (isRageStance() ? "Rage" : "Charge") + " stance: you cannot retreat. Switch stance first."
@@ -5567,11 +5629,28 @@ document.addEventListener("DOMContentLoaded", function () {
     return a;
   }
 
+  function validateFormCadenceAgainstAction(action) {
+    if (!state || !action) return true;
+    if (action.type === "ability" && action.abilityKind === "form") {
+      if (String(state.playerLastMoveCategory || "").toLowerCase() === "form") {
+        setGameErr("You cannot transform twice in a row.");
+        return false;
+      }
+    }
+    return true;
+  }
+
   function enrichPlayerActionForResolve(action) {
     var pa = Object.assign({}, action);
     pa.playerCombatMode = state.playerCombatMode || "normal";
     pa.plan = state._planLockedForSubmit || null;
     pa.planContext = buildPlanContextSnapshot();
+    if (pa.type === "ability" && pa.abilityKind === "form") {
+      pa.formTransition = {
+        fromFormId: state.playerActiveFormId || null,
+        toFormId: pa.abilityId ? String(pa.abilityId) : null,
+      };
+    }
     return pa;
   }
 
@@ -5580,6 +5659,7 @@ document.addEventListener("DOMContentLoaded", function () {
     if (state._submitBusy) return Promise.resolve();
     var action = preparePlayerActionForSubmit(playerAction);
     if (!validateStanceAgainstAction(action)) return Promise.resolve();
+    if (!validateFormCadenceAgainstAction(action)) return Promise.resolve();
     if (!validatePlanAgainstAction(action)) return Promise.resolve();
     state._submitBusy = true;
     state._planLockedForSubmit = state.playerPlan || null;
@@ -5985,7 +6065,7 @@ document.addEventListener("DOMContentLoaded", function () {
         if (codeBlock) codeBlock.hidden = false;
         setOnlineStatus("Room ready — tell Player 2 the code. Then enter your fighter in the form below and lock in.");
         syncOnlineSetupUI();
-        startHostLobbyPoll();
+        ensureHostLobbyPolling();
       })
       .catch(function (e) {
         onlineDebugLog("create room failed", (e && e.message) || e);
@@ -6020,8 +6100,19 @@ document.addEventListener("DOMContentLoaded", function () {
         _net.secret = data.guestSecret;
         _net.lastBeat = -1;
         resetGuestCharPanelUi();
-        setOnlineStatus("Enter your fighter, then tap Lock in character.");
+        setOnlineStatus("Joined room " + data.code + ". Enter your fighter, then tap Lock in character.");
         syncOnlineSetupUI();
+        return pollRoomOnce().then(function (poll) {
+          if (poll && poll.hostFighter) {
+            setOnlineStatus(
+              "Joined room " +
+                data.code +
+                ". Host locked: " +
+                poll.hostFighter +
+                ". Enter your fighter, then tap Lock in character."
+            );
+          }
+        }).catch(function () {});
       })
       .catch(function (e) {
         onlineDebugLog("join room failed", (e && e.message) || e);
@@ -6092,6 +6183,7 @@ document.addEventListener("DOMContentLoaded", function () {
     postOnlineFighter(name)
       .then(function () {
         if (youInp) youInp.disabled = true;
+        ensureHostLobbyPolling();
         return pollRoomOnce().then(updateHostLobbyFromPoll);
       })
       .catch(function (e) {
@@ -6102,6 +6194,13 @@ document.addEventListener("DOMContentLoaded", function () {
 
   syncOnlineSetupUI();
   syncOnlineBattleFooterButtons();
+
+  window.addEventListener("focus", function () {
+    ensureHostLobbyPolling();
+  });
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) ensureHostLobbyPolling();
+  });
 
   document.getElementById("registryList").addEventListener("click", function (e) {
     var t = e.target;
@@ -6619,7 +6718,7 @@ document.addEventListener("DOMContentLoaded", function () {
                   <span class="btn-battle-glyph" aria-hidden="true">↩</span>
                   <span class="btn-battle-label">Retreat</span>
                 </button>
-                <button type="button" id="btnEndure" class="btn-battle btn-endure" title="Brace and take the hit; +25% energy this beat. No passive energy recharge this beat. Works in Guard / Rage / Charge.">
+                <button type="button" id="btnEndure" class="btn-battle btn-endure" title="Brace and take the hit; +25% energy this beat. No passive energy recharge this beat. Available only in Normal or Guard.">
                   <span class="btn-battle-glyph" aria-hidden="true">&#x25CE;</span>
                   <span class="btn-battle-label">Endure</span>
                 </button>
