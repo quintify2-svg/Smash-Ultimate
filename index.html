@@ -1741,8 +1741,8 @@ document.addEventListener("DOMContentLoaded", function () {
     _hostLobbyWaitT0: 0,
   };
 
-  var ONLINE_FETCH_TIMEOUT_MS = 14000;
-  var ONLINE_FETCH_RETRIES = 2;
+  var ONLINE_FETCH_TIMEOUT_MS = 20000;
+  var ONLINE_FETCH_RETRIES = 4;
   var ONLINE_STALL_WARN_MS = 25000;
 
   function onlineRoomBase() {
@@ -2010,7 +2010,11 @@ document.addEventListener("DOMContentLoaded", function () {
             if (age >= 0 && age < 6500) setOnlineStatus("Player 2 joined room — waiting for fighter lock.");
           }
           if (!_net.guestJoined && Date.now() - _net._hostLobbyWaitT0 > ONLINE_STALL_WARN_MS) {
-            setOnlineStatus("Still waiting for Player 2… if they joined, ask them to retry code / refresh once.");
+            setOnlineStatus(
+              "Still waiting for Player 2… auto-checking room on " +
+                onlineRoomBase() +
+                " (ask Player 2 to verify they use the same room URL and latest page)."
+            );
           }
           if (_net.role !== "host" || !isOnlinePlaySelected()) return;
           _net.hostPollTimer = setTimeout(tick, 900);
@@ -6063,7 +6067,11 @@ document.addEventListener("DOMContentLoaded", function () {
         if (disp) disp.textContent = data.code;
         var codeBlock = document.getElementById("onlineCodeBlock");
         if (codeBlock) codeBlock.hidden = false;
-        setOnlineStatus("Room ready — tell Player 2 the code. Then enter your fighter in the form below and lock in.");
+        setOnlineStatus(
+          "Room ready on " +
+            onlineRoomBase() +
+            " — tell Player 2 the code. Then enter your fighter in the form below and lock in."
+        );
         syncOnlineSetupUI();
         ensureHostLobbyPolling();
       })
@@ -6100,7 +6108,9 @@ document.addEventListener("DOMContentLoaded", function () {
         _net.secret = data.guestSecret;
         _net.lastBeat = -1;
         resetGuestCharPanelUi();
-        setOnlineStatus("Joined room " + data.code + ". Enter your fighter, then tap Lock in character.");
+        setOnlineStatus(
+          "Joined room " + data.code + " on " + onlineRoomBase() + ". Enter your fighter, then tap Lock in character."
+        );
         syncOnlineSetupUI();
         return pollRoomOnce().then(function (poll) {
           if (poll && poll.hostFighter) {
